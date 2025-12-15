@@ -26,12 +26,12 @@ ai-agent/
 
 ## 설치 및 실행
 
-1. Conda 가상환경 생성:
+1. Conda 가상환경 생성
 ```bash
 conda create -n ai-agent python=3.12
 ```
 
-2. 가상환경 활성화:
+2. 가상환경 활성화
 ```bash
 conda activate ai-agent
 ```
@@ -41,12 +41,12 @@ conda activate ai-agent
 pip install -r requirements.txt
 ```
 
-4. 서버 실행:
+4. 서버 실행
 ```bash
 uvicorn app.main:app --reload
 ```
 
-5. 브라우저에서 접속:
+5. 브라우저에서 접속
 ```
 http://localhost:8000
 ```
@@ -56,11 +56,3 @@ http://localhost:8000
 - **활성화**: `conda activate ai-agent`
 - **비활성화**: `conda deactivate`
 - **삭제**: `conda remove -n ai-agent --all`
-
-## 다음 단계
-
-- `app/routes/chat.py`에 AI 모델 연동 (LangGraph, LLM API 등)
-- LLM, 코딩 AI, 디자인 AI 비교 분석 로직 구현
-- 데이터베이스 추가 (대화 히스토리 저장)
-- Deep Research 기능 연동
-
