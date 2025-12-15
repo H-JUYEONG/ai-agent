@@ -1,6 +1,7 @@
-# AI 챗봇 애플리케이션
+# AI Service Advisor - AI 서비스 비교 분석 챗봇
 
-FastAPI와 Jinja2를 사용한 챗봇 UI 프로젝트입니다.
+FastAPI + Jinja2로 구현한 AI 서비스 비교 분석 챗봇입니다.  
+LLM, 코딩 AI, 디자인 AI 등 다양한 AI 서비스를 사용 목적에 맞게 비교하고 분석해줍니다.
 
 ## 프로젝트 구조
 
@@ -25,31 +26,41 @@ ai-agent/
 
 ## 설치 및 실행
 
-1. 가상환경 생성 및 활성화:
+1. Conda 가상환경 생성:
 ```bash
-python -m venv venv
-venv\Scripts\activate  # Windows
+conda create -n ai-agent python=3.12
 ```
 
-2. 패키지 설치:
+2. 가상환경 활성화:
+```bash
+conda activate ai-agent
+```
+
+3. 패키지 설치:
 ```bash
 pip install -r requirements.txt
 ```
 
-3. 서버 실행:
+4. 서버 실행:
 ```bash
 uvicorn app.main:app --reload
 ```
 
-4. 브라우저에서 접속:
+5. 브라우저에서 접속:
 ```
 http://localhost:8000
 ```
 
+## 가상환경 관리
+
+- **활성화**: `conda activate ai-agent`
+- **비활성화**: `conda deactivate`
+- **삭제**: `conda remove -n ai-agent --all`
+
 ## 다음 단계
 
-- `app/routes/chat.py`에 AI 모델 연동 (OpenAI, Claude 등)
+- `app/routes/chat.py`에 AI 모델 연동 (LangGraph, LLM API 등)
+- LLM, 코딩 AI, 디자인 AI 비교 분석 로직 구현
 - 데이터베이스 추가 (대화 히스토리 저장)
-- 사용자 인증 기능 추가
-- 스트리밍 응답 구현
+- Deep Research 기능 연동
 
