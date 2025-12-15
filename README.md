@@ -1,7 +1,7 @@
 # AI Service Advisor - AI 서비스 비교 분석 챗봇
 
 FastAPI + Jinja2로 구현한 AI 서비스 비교 분석 챗봇입니다.  
-LLM, 코딩 AI, 디자인 AI 등 다양한 AI 서비스를 사용 목적에 맞게 비교하고 분석해줍니다.
+LLM, 코딩 AI, 디자인 AI 등 다양한 AI 서비스를 사용 목적에 맞게 비교하고 분석합니다다.
 
 ## 프로젝트 구조
 
@@ -28,12 +28,12 @@ ai-agent/
 
 1. Conda 가상환경 생성
 ```bash
-conda create -n ai-agent python=3.12
+conda create -n agent python=3.12
 ```
 
 2. 가상환경 활성화
 ```bash
-conda activate ai-agent
+conda activate agent
 ```
 
 3. 패키지 설치:
@@ -53,6 +53,6 @@ http://localhost:8000
 
 ## 가상환경 관리
 
-- **활성화**: `conda activate ai-agent`
+- **활성화**: `conda activate agent`
 - **비활성화**: `conda deactivate`
-- **삭제**: `conda remove -n ai-agent --all`
+- **삭제**: `conda remove -n agent --all`
