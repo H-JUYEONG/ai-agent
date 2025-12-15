@@ -12,7 +12,7 @@ function appendMessageWithOptions() {
     // 메시지 말풍선 (줄바꿈 포함)
     const messageDiv = document.createElement("div");
     messageDiv.className = "message assistant";
-    messageDiv.innerHTML = "안녕하세요! 👋 AI 서비스 분석 어시스턴트입니다.<br>분석하고 싶은 AI 서비스 분야를 선택해주세요.";
+    messageDiv.innerHTML = "안녕하세요! 👋 AI 서비스 분석 어시스턴트입니다.<br><br>분석하고 싶은 AI 서비스 분야를 선택해주세요.";
     messages.appendChild(messageDiv);
     
     // 선택 버튼들 (말풍선 밖에 별도로)
