@@ -5,78 +5,20 @@ document.addEventListener('DOMContentLoaded', function() {
     }, 300);
 });
 
-// 선택지와 함께 메시지 추가
+// 초기 환영 메시지 추가
 function appendMessageWithOptions() {
     const messages = document.getElementById("messages");
     
-    // 메시지 말풍선 (줄바꿈 포함)
+    // 메시지 말풍선
     const messageDiv = document.createElement("div");
     messageDiv.className = "message assistant";
-    messageDiv.innerHTML = "안녕하세요! 👋 AI 서비스 분석 어시스턴트입니다.<br><br>분석하고 싶은 AI 서비스 분야를 선택해주세요.";
+    messageDiv.innerHTML = "안녕하세요! 👋 코딩 AI 도입 의사결정 어시스턴트입니다.<br><br>팀 또는 회사의 상황을 알려주시면, 그에 맞는 코딩 AI 도구를 추천해드립니다.<br><br>다음 정보를 알려주세요:<br>• 💰 <strong>예산</strong> (예: 월 50만원 이하)<br>• 🔒 <strong>보안 요구사항</strong> (예: 코드가 외부로 유출되면 안 됨)<br>• 💻 <strong>사용하는 IDE</strong> (예: VS Code, IntelliJ, PyCharm)<br>• 📋 <strong>업무 특성</strong> (예: 웹 개발, 모바일 앱, 데이터 분석)";
     messages.appendChild(messageDiv);
-    
-    // 선택 버튼들 (말풍선 밖에 별도로)
-    const optionsContainer = document.createElement("div");
-    optionsContainer.className = "option-buttons";
-    optionsContainer.id = "option-buttons-container";
-    
-    const options = [
-        { icon: "🤖", text: "LLM", domain: "LLM", query: "LLM 서비스들을 비교해주세요" },
-        { icon: "💻", text: "코딩 AI", domain: "코딩", query: "코딩 AI 도구들을 비교해주세요" },
-        { icon: "🎨", text: "디자인 AI", domain: "디자인", query: "디자인 AI 서비스들을 비교해주세요" }
-    ];
-    
-    options.forEach(option => {
-        const btn = document.createElement("button");
-        btn.className = "option-btn";
-        btn.innerHTML = `<span class="icon">${option.icon}</span> ${option.text}`;
-        btn.onclick = () => selectOption(option.domain, option.query);
-        optionsContainer.appendChild(btn);
-    });
-    
-    messages.appendChild(optionsContainer);
     messages.scrollTop = messages.scrollHeight;
 }
 
-// 현재 선택된 도메인 (전역 변수)
-let currentDomain = "LLM";
-
-// 선택지 클릭 시
-async function selectOption(domain, query) {
-    currentDomain = domain;
-    
-    // 선택 버튼들 숨기기
-    const optionsContainer = document.getElementById("option-buttons-container");
-    if (optionsContainer) {
-        optionsContainer.style.display = 'none';
-    }
-    
-    // 사용자가 선택한 것처럼 메시지 추가
-    appendMessage("user", query);
-    
-    // 로딩 표시
-    const loadingId = showLoading();
-    
-    try {
-        // API 호출
-        const response = await fetch("/api/chat", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ 
-                message: query,
-                domain: domain
-            })
-        });
-        
-        const data = await response.json();
-        removeLoading(loadingId);
-        appendMessage("assistant", data.reply);
-    } catch (error) {
-        console.error("Error:", error);
-        removeLoading(loadingId);
-        appendMessage("assistant", "⚠️ 오류가 발생했습니다. 다시 시도해주세요.");
-    }
-}
+// 도메인은 항상 코딩으로 고정
+let currentDomain = "코딩";
 
 // 메시지 전송
 async function sendMessage() {
@@ -126,7 +68,7 @@ function showLoading() {
             <span></span>
         </div>
         <p style="margin-top: 8px; color: #666; font-size: 13px;">
-            🔍 AI 서비스 정보를 분석하고 있습니다...
+            🔍 팀 상황에 맞는 코딩 AI 도구를 분석하고 있습니다...
         </p>
     `;
     messages.appendChild(loadingDiv);
