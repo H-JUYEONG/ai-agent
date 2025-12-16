@@ -1,0 +1,523 @@
+"""LangGraph nodes for AI Service Advisor"""
+
+import asyncio
+from typing import Literal
+from langchain.chat_models import init_chat_model
+from langchain_core.messages import (
+    AIMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+    get_buffer_string,
+)
+from langchain_core.runnables import RunnableConfig
+from langgraph.types import Command
+
+from app.agent.configuration import Configuration
+from app.agent.state import (
+    AgentState,
+    ClarifyWithUser,
+    ConductResearch,
+    ResearchComplete,
+    ResearchQuestion,
+    ResearcherState,
+    SupervisorState,
+)
+from app.agent.prompts import (
+    DOMAIN_GUIDES,
+    clarify_with_user_instructions,
+    transform_messages_into_research_topic_prompt,
+    lead_researcher_prompt,
+    research_system_prompt,
+    compress_research_system_prompt,
+    compress_research_simple_human_message,
+    final_report_generation_prompt,
+    get_today_str,
+)
+from app.agent.utils import (
+    think_tool,
+    get_api_key_for_model,
+    get_notes_from_tool_calls,
+)
+from app.tools.search import searcher
+
+# 설정 가능한 모델
+configurable_model = init_chat_model(
+    configurable_fields=("model", "max_tokens", "api_key"),
+)
+
+
+async def clarify_with_user(
+    state: AgentState, config: RunnableConfig
+) -> Command[Literal["write_research_brief", "__end__"]]:
+    """사용자 질문 명확화 (선택적)"""
+    
+    configurable = Configuration.from_runnable_config(config)
+    
+    # 명확화 비활성화 시 바로 다음 단계로
+    if not configurable.allow_clarification:
+        return Command(goto="write_research_brief")
+    
+    messages = state["messages"]
+    domain = state.get("domain", "AI 서비스")
+    
+    model_config = {
+        "model": configurable.research_model,
+        "max_tokens": configurable.research_model_max_tokens,
+        "api_key": get_api_key_for_model(configurable.research_model, config),
+    }
+    
+    clarification_model = (
+        configurable_model
+        .with_structured_output(ClarifyWithUser)
+        .with_retry(stop_after_attempt=configurable.max_structured_output_retries)
+        .with_config(model_config)
+    )
+    
+    prompt_content = clarify_with_user_instructions.format(
+        messages=get_buffer_string(messages),
+        date=get_today_str(),
+        domain=domain
+    )
+    
+    response = await clarification_model.ainvoke([HumanMessage(content=prompt_content)])
+    
+    if response.need_clarification:
+        return Command(
+            goto="__end__",
+            update={"messages": [AIMessage(content=response.question)]}
+        )
+    else:
+        return Command(
+            goto="write_research_brief",
+            update={"messages": [AIMessage(content=response.verification)]}
+        )
+
+
+async def write_research_brief(
+    state: AgentState, config: RunnableConfig
+) -> Command[Literal["research_supervisor"]]:
+    """연구 계획 수립"""
+    
+    configurable = Configuration.from_runnable_config(config)
+    domain = state.get("domain", "AI 서비스")
+    domain_guide = DOMAIN_GUIDES.get(domain, "")
+    
+    research_model_config = {
+        "model": configurable.research_model,
+        "max_tokens": configurable.research_model_max_tokens,
+        "api_key": get_api_key_for_model(configurable.research_model, config),
+    }
+    
+    research_model = (
+        configurable_model
+        .with_structured_output(ResearchQuestion)
+        .with_retry(stop_after_attempt=configurable.max_structured_output_retries)
+        .with_config(research_model_config)
+    )
+    
+    prompt_content = transform_messages_into_research_topic_prompt.format(
+        messages=get_buffer_string(state.get("messages", [])),
+        date=get_today_str(),
+        domain=domain,
+        domain_guide=domain_guide
+    )
+    
+    response = await research_model.ainvoke([HumanMessage(content=prompt_content)])
+    
+    supervisor_system_prompt = lead_researcher_prompt.format(
+        date=get_today_str(),
+        domain=domain,
+        domain_guide=domain_guide,
+        max_concurrent_research_units=configurable.max_concurrent_research_units,
+        max_researcher_iterations=configurable.max_researcher_iterations
+    )
+    
+    return Command(
+        goto="research_supervisor",
+        update={
+            "research_brief": response.research_brief,
+            "supervisor_messages": {
+                "type": "override",
+                "value": [
+                    SystemMessage(content=supervisor_system_prompt),
+                    HumanMessage(content=response.research_brief)
+                ]
+            }
+        }
+    )
+
+
+async def supervisor(
+    state: SupervisorState, config: RunnableConfig
+) -> Command[Literal["supervisor_tools"]]:
+    """연구 슈퍼바이저 (연구 계획 및 위임)"""
+    
+    configurable = Configuration.from_runnable_config(config)
+    
+    research_model_config = {
+        "model": configurable.research_model,
+        "max_tokens": configurable.research_model_max_tokens,
+        "api_key": get_api_key_for_model(configurable.research_model, config),
+    }
+    
+    tools = [ConductResearch, ResearchComplete, think_tool]
+    
+    research_model = (
+        configurable_model
+        .bind_tools(tools)
+        .with_retry(stop_after_attempt=configurable.max_structured_output_retries)
+        .with_config(research_model_config)
+    )
+    
+    supervisor_messages = state.get("supervisor_messages", [])
+    response = await research_model.ainvoke(supervisor_messages)
+    
+    return Command(
+        goto="supervisor_tools",
+        update={
+            "supervisor_messages": [response],
+            "research_iterations": state.get("research_iterations", 0) + 1
+        }
+    )
+
+
+async def supervisor_tools(
+    state: SupervisorState, config: RunnableConfig
+) -> Command[Literal["supervisor", "__end__"]]:
+    """슈퍼바이저 도구 실행"""
+    
+    configurable = Configuration.from_runnable_config(config)
+    supervisor_messages = state.get("supervisor_messages", [])
+    research_iterations = state.get("research_iterations", 0)
+    most_recent_message = supervisor_messages[-1]
+    
+    # 종료 조건
+    exceeded_iterations = research_iterations > configurable.max_researcher_iterations
+    no_tool_calls = not most_recent_message.tool_calls
+    research_complete_called = any(
+        tc["name"] == "ResearchComplete" for tc in most_recent_message.tool_calls
+    )
+    
+    if exceeded_iterations or no_tool_calls or research_complete_called:
+        return Command(
+            goto="__end__",
+            update={
+                "notes": get_notes_from_tool_calls(supervisor_messages),
+                "research_brief": state.get("research_brief", "")
+            }
+        )
+    
+    # 도구 실행
+    all_tool_messages = []
+    update_payload = {"supervisor_messages": []}
+    
+    # 모든 tool_calls 처리
+    for tc in most_recent_message.tool_calls:
+        if tc["name"] == "think_tool":
+            all_tool_messages.append(ToolMessage(
+                content=f"사고 기록: {tc['args']['reflection']}",
+                name="think_tool",
+                tool_call_id=tc["id"]
+            ))
+        
+        elif tc["name"] == "ConductResearch":
+            # 나중에 일괄 처리
+            pass
+        
+        elif tc["name"] == "ResearchComplete":
+            all_tool_messages.append(ToolMessage(
+                content="연구 완료 확인",
+                name="ResearchComplete",
+                tool_call_id=tc["id"]
+            ))
+        
+        else:
+            # 알 수 없는 tool call에도 응답 (오류 방지)
+            all_tool_messages.append(ToolMessage(
+                content=f"도구 '{tc['name']}'는 지원되지 않습니다.",
+                name=tc["name"],
+                tool_call_id=tc["id"]
+            ))
+    
+    # ConductResearch 일괄 처리
+    conduct_calls = [tc for tc in most_recent_message.tool_calls if tc["name"] == "ConductResearch"]
+    
+    if conduct_calls:
+        # researcher_subgraph import (순환 참조 방지)
+        from app.agent.graph import researcher_subgraph
+        
+        allowed_calls = conduct_calls[:configurable.max_concurrent_research_units]
+        skipped_calls = conduct_calls[configurable.max_concurrent_research_units:]
+        
+        # 병렬 연구 실행
+        tasks = [
+            researcher_subgraph.ainvoke({
+                "researcher_messages": [HumanMessage(content=tc["args"]["research_topic"])],
+                "research_topic": tc["args"]["research_topic"],
+                "domain": state.get("domain")
+            }, config)
+            for tc in allowed_calls
+        ]
+        
+        results = await asyncio.gather(*tasks)
+        
+        for observation, tc in zip(results, allowed_calls):
+            all_tool_messages.append(ToolMessage(
+                content=observation.get("compressed_research", "연구 실패"),
+                name=tc["name"],
+                tool_call_id=tc["id"]
+            ))
+        
+        # 제한 초과로 건너뛴 호출에도 응답 (오류 방지)
+        for tc in skipped_calls:
+            all_tool_messages.append(ToolMessage(
+                content="병렬 연구 제한으로 다음 반복에서 처리됩니다.",
+                name=tc["name"],
+                tool_call_id=tc["id"]
+            ))
+        
+        # raw_notes 수집
+        raw_notes = "\n".join([
+            "\n".join(obs.get("raw_notes", [])) for obs in results
+        ])
+        if raw_notes:
+            update_payload["raw_notes"] = [raw_notes]
+    
+    update_payload["supervisor_messages"] = all_tool_messages
+    return Command(goto="supervisor", update=update_payload)
+
+
+async def researcher(
+    state: ResearcherState, config: RunnableConfig
+) -> Command[Literal["researcher_tools"]]:
+    """개별 연구원 (웹 검색 수행)"""
+    
+    configurable = Configuration.from_runnable_config(config)
+    domain = state.get("domain", "AI 서비스")
+    domain_guide = DOMAIN_GUIDES.get(domain, "")
+    
+    research_model_config = {
+        "model": configurable.research_model,
+        "max_tokens": configurable.research_model_max_tokens,
+        "api_key": get_api_key_for_model(configurable.research_model, config),
+    }
+    
+    # 검색 도구 정의
+    async def web_search(query: str) -> str:
+        """웹 검색 도구"""
+        result = await searcher.search(
+            query=query,
+            max_results=configurable.search_max_results,
+            search_depth=configurable.search_depth
+        )
+        
+        if not result["success"]:
+            return f"검색 실패: {result.get('error', '알 수 없는 오류')}"
+        
+        # 결과 포맷팅
+        formatted = f"검색 결과 ({result['source']}):\n\n"
+        for idx, r in enumerate(result["results"], 1):
+            formatted += f"{idx}. {r['title']}\n"
+            formatted += f"   URL: {r['url']}\n"
+            formatted += f"   내용: {r['content'][:200]}...\n\n"
+        
+        return formatted
+    
+    tools = [web_search, think_tool]
+    
+    research_model = (
+        configurable_model
+        .bind_tools(tools)
+        .with_retry(stop_after_attempt=configurable.max_structured_output_retries)
+        .with_config(research_model_config)
+    )
+    
+    researcher_prompt = research_system_prompt.format(
+        domain=domain,
+        domain_guide=domain_guide,
+        date=get_today_str()
+    )
+    
+    messages = [SystemMessage(content=researcher_prompt)] + state.get("researcher_messages", [])
+    response = await research_model.ainvoke(messages)
+    
+    return Command(
+        goto="researcher_tools",
+        update={
+            "researcher_messages": [response],
+            "tool_call_iterations": state.get("tool_call_iterations", 0) + 1
+        }
+    )
+
+
+async def researcher_tools(
+    state: ResearcherState, config: RunnableConfig
+) -> Command[Literal["researcher", "compress_research"]]:
+    """연구원 도구 실행"""
+    
+    configurable = Configuration.from_runnable_config(config)
+    researcher_messages = state.get("researcher_messages", [])
+    most_recent_message = researcher_messages[-1]
+    
+    # 도구 호출 없으면 종료
+    if not most_recent_message.tool_calls:
+        return Command(goto="compress_research")
+    
+    # 도구 실행
+    tool_outputs = []
+    
+    for tc in most_recent_message.tool_calls:
+        if tc["name"] == "web_search":
+            # 교차 검증 활성화 (Tavily + DuckDuckGo 동시 검색)
+            result = await searcher.search(
+                query=tc["args"]["query"],
+                max_results=configurable.search_max_results,
+                enable_verification=True  # 교차 검증 활성화
+            )
+            
+            if result["success"]:
+                source_info = result.get("source", "unknown")
+                if source_info == "verified":
+                    verified_info = f"교차 검증됨 (Tavily: {result.get('tavily_count', 0)}개, DuckDuckGo: {result.get('ddg_count', 0)}개 → {result.get('verified_count', 0)}개 검증)"
+                else:
+                    verified_info = f"({source_info})"
+                
+                formatted = f"검색 결과 {verified_info}:\n\n"
+                
+                # 공식 사이트 결과 표시
+                official_results = [r for r in result["results"] if r.get("is_official", False)]
+                if official_results:
+                    formatted += "📌 공식 사이트 결과:\n"
+                    for idx, r in enumerate(official_results, 1):
+                        formatted += f"{idx}. {r['title']}\n   URL: {r['url']}\n   {r['content'][:200]}...\n\n"
+                
+                # 일반 결과
+                other_results = [r for r in result["results"] if not r.get("is_official", False)]
+                if other_results:
+                    if official_results:
+                        formatted += "기타 결과:\n"
+                    for idx, r in enumerate(other_results, len(official_results) + 1):
+                        formatted += f"{idx}. {r['title']}\n   URL: {r['url']}\n   {r['content'][:200]}...\n\n"
+                
+                # 가격 정보 추출 및 표시 (가격 관련 쿼리인 경우)
+                if any(kw in tc["args"]["query"].lower() for kw in ["pricing", "cost", "subscription", "plan", "가격"]):
+                    pricing_info = searcher.extract_pricing_info(result["results"])
+                    if pricing_info["pricing"]:
+                        formatted += f"\n💰 추출된 가격 정보 (신뢰도: {pricing_info['confidence']}):\n"
+                        for p in pricing_info["pricing"]:
+                            formatted += f"- {p['plan']}: {p['price']} (출처: {len(p['sources'])}개, 공식: {p['official_count']}개)\n"
+                
+                content = formatted
+            else:
+                content = f"검색 실패: {result.get('error', '알 수 없는 오류')}"
+            
+            tool_outputs.append(ToolMessage(
+                content=content,
+                name="web_search",
+                tool_call_id=tc["id"]
+            ))
+        
+        elif tc["name"] == "think_tool":
+            tool_outputs.append(ToolMessage(
+                content=f"사고: {tc['args']['reflection']}",
+                name="think_tool",
+                tool_call_id=tc["id"]
+            ))
+        
+        else:
+            # 알 수 없는 tool call에도 응답 (오류 방지)
+            tool_outputs.append(ToolMessage(
+                content=f"도구 '{tc['name']}'는 지원되지 않습니다.",
+                name=tc["name"],
+                tool_call_id=tc["id"]
+            ))
+    
+    # 종료 조건
+    exceeded = state.get("tool_call_iterations", 0) >= configurable.max_react_tool_calls
+    
+    if exceeded:
+        return Command(goto="compress_research", update={"researcher_messages": tool_outputs})
+    
+    return Command(goto="researcher", update={"researcher_messages": tool_outputs})
+
+
+async def compress_research(state: ResearcherState, config: RunnableConfig):
+    """연구 결과 압축"""
+    
+    configurable = Configuration.from_runnable_config(config)
+    
+    compression_model = configurable_model.with_config({
+        "model": configurable.compression_model,
+        "max_tokens": configurable.compression_model_max_tokens,
+        "api_key": get_api_key_for_model(configurable.compression_model, config),
+    })
+    
+    researcher_messages = state.get("researcher_messages", [])
+    researcher_messages.append(HumanMessage(content=compress_research_simple_human_message))
+    
+    compression_prompt = compress_research_system_prompt.format(date=get_today_str())
+    messages = [SystemMessage(content=compression_prompt)] + researcher_messages
+    
+    try:
+        response = await compression_model.ainvoke(messages)
+        
+        raw_notes = "\n".join([
+            str(msg.content) for msg in researcher_messages
+            if isinstance(msg, (ToolMessage, AIMessage))
+        ])
+        
+        return {
+            "compressed_research": str(response.content),
+            "raw_notes": [raw_notes]
+        }
+    
+    except Exception as e:
+        print(f"❌ 압축 실패: {e}")
+        return {
+            "compressed_research": "연구 결과 압축 실패",
+            "raw_notes": [""]
+        }
+
+
+async def final_report_generation(state: AgentState, config: RunnableConfig):
+    """최종 리포트 생성"""
+    
+    configurable = Configuration.from_runnable_config(config)
+    notes = state.get("notes", [])
+    findings = "\n\n".join(notes)
+    
+    writer_model_config = {
+        "model": configurable.final_report_model,
+        "max_tokens": configurable.final_report_model_max_tokens,
+        "api_key": get_api_key_for_model(configurable.final_report_model, config),
+    }
+    
+    final_prompt = final_report_generation_prompt.format(
+        research_brief=state.get("research_brief", ""),
+        messages=get_buffer_string(state.get("messages", [])),
+        findings=findings,
+        date=get_today_str()
+    )
+    
+    try:
+        final_report = await configurable_model.with_config(writer_model_config).ainvoke([
+            HumanMessage(content=final_prompt)
+        ])
+        
+        return {
+            "final_report": final_report.content,
+            "messages": [final_report],
+            "notes": {"type": "override", "value": []}
+        }
+    
+    except Exception as e:
+        print(f"❌ 리포트 생성 실패: {e}")
+        return {
+            "final_report": f"리포트 생성 중 오류 발생: {str(e)}",
+            "messages": [AIMessage(content="리포트 생성 실패")],
+            "notes": {"type": "override", "value": []}
+        }
+
+
+
