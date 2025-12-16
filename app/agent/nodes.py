@@ -33,6 +33,8 @@ from app.agent.prompts import (
     compress_research_simple_human_message,
     final_report_generation_prompt,
     get_today_str,
+    get_current_year,
+    get_current_month_year,
 )
 from app.agent.utils import (
     think_tool,
@@ -116,19 +118,44 @@ async def write_research_brief(
         .with_config(research_model_config)
     )
     
+    # domain_guide 포맷팅 (transform_messages에서도 사용)
+    try:
+        formatted_domain_guide_for_research = domain_guide.format(
+            date=get_today_str(),
+            current_year=get_current_year(),
+            current_month_year=get_current_month_year()
+        )
+    except KeyError:
+        formatted_domain_guide_for_research = domain_guide
+    
     prompt_content = transform_messages_into_research_topic_prompt.format(
         messages=get_buffer_string(state.get("messages", [])),
         date=get_today_str(),
+        current_year=get_current_year(),
+        current_month_year=get_current_month_year(),
         domain=domain,
-        domain_guide=domain_guide
+        domain_guide=formatted_domain_guide_for_research
     )
     
     response = await research_model.ainvoke([HumanMessage(content=prompt_content)])
     
+    # domain_guide도 포맷팅 필요 (current_year 등 포함)
+    try:
+        formatted_domain_guide = domain_guide.format(
+            date=get_today_str(),
+            current_year=get_current_year(),
+            current_month_year=get_current_month_year()
+        )
+    except KeyError:
+        # 포맷팅 변수가 없으면 그대로 사용
+        formatted_domain_guide = domain_guide
+    
     supervisor_system_prompt = lead_researcher_prompt.format(
         date=get_today_str(),
+        current_year=get_current_year(),
+        current_month_year=get_current_month_year(),
         domain=domain,
-        domain_guide=domain_guide,
+        domain_guide=formatted_domain_guide,
         max_concurrent_research_units=configurable.max_concurrent_research_units,
         max_researcher_iterations=configurable.max_researcher_iterations
     )
@@ -333,10 +360,23 @@ async def researcher(
         .with_config(research_model_config)
     )
     
+    # domain_guide도 포맷팅 필요 (current_year 등 포함)
+    try:
+        formatted_domain_guide_researcher = domain_guide.format(
+            date=get_today_str(),
+            current_year=get_current_year(),
+            current_month_year=get_current_month_year()
+        )
+    except KeyError:
+        # 포맷팅 변수가 없으면 그대로 사용
+        formatted_domain_guide_researcher = domain_guide
+    
     researcher_prompt = research_system_prompt.format(
         domain=domain,
-        domain_guide=domain_guide,
-        date=get_today_str()
+        domain_guide=formatted_domain_guide_researcher,
+        date=get_today_str(),
+        current_year=get_current_year(),
+        current_month_year=get_current_month_year()
     )
     
     messages = [SystemMessage(content=researcher_prompt)] + state.get("researcher_messages", [])
