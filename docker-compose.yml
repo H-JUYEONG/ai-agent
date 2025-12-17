@@ -1,12 +1,8 @@
-version: '3.8'
-
 services:
   # Redis 캐시 서버
   redis:
     image: redis:7-alpine
     container_name: ai-agent-redis
-    ports:
-      - "6379:6379"
     volumes:
       - redis_data:/data
     command: redis-server --appendonly yes
@@ -27,30 +23,33 @@ services:
       # Redis 연결 (같은 네트워크의 redis 서비스)
       - REDIS_HOST=redis
       - REDIS_PORT=6379
-      
-      # API Keys (실제 값은 .env 파일에서 가져옴)
+
+      # API Keys (.env에서 주입)
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - TAVILY_API_KEY=${TAVILY_API_KEY}
       - SERPER_API_KEY=${SERPER_API_KEY}
-      
-      # LangSmith (선택 - 디버깅 및 모니터링)
+
+      # LangSmith (선택)
       - LANGSMITH_API_KEY=${LANGSMITH_API_KEY:-}
       - LANGSMITH_TRACING=${LANGSMITH_TRACING:-true}
       - LANGSMITH_PROJECT=${LANGSMITH_PROJECT:-ai-service-advisor}
+
     depends_on:
       redis:
         condition: service_healthy
+
     restart: unless-stopped
+
     volumes:
       - ./app:/app/app
+
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
 volumes:
   redis_data:
     driver: local
-
