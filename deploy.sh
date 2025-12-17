@@ -11,22 +11,37 @@ echo "🚀 AI Agent 배포 시작..."
 # echo "📥 코드 업데이트..."
 # git pull origin main
 
-# 2. 기존 컨테이너 중지 및 제거
-echo "🛑 기존 컨테이너 중지 및 제거..."
-docker compose down
+# 2. Redis 컨테이너 확인 및 시작 (없을 경우에만 생성)
+echo "🔍 Redis 컨테이너 확인..."
+if ! docker compose ps redis | grep -q "Up"; then
+    echo "📦 Redis 컨테이너 시작..."
+    docker compose up -d redis
+    echo "⏳ Redis 초기화 대기..."
+    sleep 3
+else
+    echo "✅ Redis 이미 실행 중"
+fi
 
-# 3. 사용하지 않는 이미지 및 컨테이너 정리
-echo "🧹 불필요한 Docker 리소스 정리..."
-docker system prune -f
+# 3. Redis 캐시 초기화 (키만 삭제)
+echo "🗑️ Redis 캐시 초기화..."
+docker compose exec -T redis redis-cli FLUSHALL
+
+# 4. 애플리케이션 컨테이너만 중지 및 제거
+echo "🛑 애플리케이션 컨테이너 중지 및 제거..."
+docker compose stop app
+docker compose rm -f app
+
+# 5. 사용하지 않는 이미지 정리
+echo "🧹 불필요한 Docker 이미지 정리..."
 docker image prune -a -f
 
-# 4. 새 이미지 빌드
-echo "🔨 Docker 이미지 빌드..."
-docker compose build --no-cache
+# 6. 애플리케이션 이미지 빌드
+echo "🔨 애플리케이션 이미지 빌드..."
+docker compose build --no-cache app
 
-# 5. 컨테이너 시작
-echo "▶️ 컨테이너 시작..."
-docker compose up -d
+# 7. 애플리케이션 컨테이너 시작
+echo "▶️ 애플리케이션 컨테이너 시작..."
+docker compose up -d app
 
 # 6. 로그 확인
 echo "📋 로그 확인 (최근 로그)..."

@@ -26,3 +26,4 @@ ENV PYTHONUNBUFFERED=1
 # 애플리케이션 실행
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
 
+
