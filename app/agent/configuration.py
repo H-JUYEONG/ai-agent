@@ -18,14 +18,14 @@ class Configuration(BaseModel):
     max_researcher_iterations: int = Field(default=1)  # 1회 반복
     max_react_tool_calls: int = Field(default=5)  # 각 researcher 5번 검색 (가격 정보 반드시 찾기!)
     
-    # 모델 설정 (비용 & 속도 최적화)
+    # 모델 설정 (비용 최적화 - 모두 mini 사용!)
     research_model: str = Field(default="gpt-4o-mini")
     research_model_max_tokens: int = Field(default=8192)
     
     compression_model: str = Field(default="gpt-4o-mini")
     compression_model_max_tokens: int = Field(default=8192)
     
-    final_report_model: str = Field(default="gpt-4o")
+    final_report_model: str = Field(default="gpt-4o-mini")  # 비용 절감!
     final_report_model_max_tokens: int = Field(default=16384)
     
     # 검색 설정

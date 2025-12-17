@@ -1,12 +1,12 @@
-"""웹 검색 도구 (Tavily + DuckDuckGo 교차 검증 + Redis 캐싱)"""
+"""웹 검색 도구 (Tavily + Serper.dev Fallback + Redis 캐싱)"""
 
 import os
 import hashlib
 import re
 import asyncio
+import aiohttp
 from typing import List, Dict, Any, Optional, Set
 from tavily import TavilyClient
-from duckduckgo_search import DDGS
 from dotenv import load_dotenv
 from app.tools.cache import research_cache
 
@@ -15,18 +15,18 @@ load_dotenv()
 
 
 class SearchWithFallback:
-    """Tavily 우선, 실패 시 DuckDuckGo Fallback"""
+    """Tavily 우선, 실패 시 Serper.dev Fallback"""
     
-    def __init__(self, tavily_api_key: Optional[str] = None):
+    def __init__(self, tavily_api_key: Optional[str] = None, serper_api_key: Optional[str] = None):
         self.tavily_api_key = tavily_api_key or os.getenv("TAVILY_API_KEY")
+        self.serper_api_key = serper_api_key or os.getenv("SERPER_API_KEY")
+        
         self.tavily = None
         if self.tavily_api_key and self.tavily_api_key != "tvly-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx":
             try:
                 self.tavily = TavilyClient(api_key=self.tavily_api_key)
             except Exception as e:
-                pass  # 초기화 실패 시 DuckDuckGo 사용
-        
-        self.ddgs = DDGS()
+                pass  # 초기화 실패 시 Serper 사용
     
     async def search(
         self, 
@@ -46,19 +46,19 @@ class SearchWithFallback:
         if enable_verification and self.tavily:
             return await self._search_with_verification(query, max_results, search_depth)
         
-        # 교차 검증 비활성화: 기존 방식 (Tavily → DuckDuckGo Fallback)
+        # 교차 검증 비활성화: 기존 방식 (Tavily → Serper Fallback)
         if self.tavily:
             tavily_result = await self._search_tavily(query, max_results, search_depth)
             if tavily_result["success"]:
                 research_cache.set(query, tavily_result, domain="search", prefix="query")
                 return tavily_result
         
-        # DuckDuckGo Fallback
-        duckduckgo_result = await self._search_duckduckgo(query, max_results)
-        if duckduckgo_result.get("success"):
-            research_cache.set(query, duckduckgo_result, domain="search", prefix="query")
+        # Serper Fallback
+        serper_result = await self._search_serper(query, max_results)
+        if serper_result.get("success"):
+            research_cache.set(query, serper_result, domain="search", prefix="query")
         
-        return duckduckgo_result
+        return serper_result
     
     async def _search_with_verification(
         self,
@@ -66,34 +66,35 @@ class SearchWithFallback:
         max_results: int,
         search_depth: str
     ) -> Dict[str, Any]:
-        """Tavily + DuckDuckGo 동시 검색 및 교차 검증"""
-        print(f"🔍 [교차 검증] Tavily + DuckDuckGo 동시 검색: {query}")
+        """Tavily 우선, 실패 시 Serper.dev Fallback"""
+        print(f"🔍 [검색] Tavily 우선 검색: {query}")
         
-        # 병렬 검색
-        tavily_task = self._search_tavily(query, max_results, search_depth)
-        ddg_task = self._search_duckduckgo(query, max_results)
+        # Tavily 먼저 시도
+        tavily_result = await self._search_tavily(query, max_results, search_depth)
         
-        tavily_result, ddg_result = await asyncio.gather(tavily_task, ddg_task)
+        if tavily_result.get("success"):
+            print(f"✅ [Tavily] 충분한 결과 확보")
+            research_cache.set(query, tavily_result, domain="search", prefix="query")
+            return tavily_result
         
-        # 결과 통합 및 검증
-        verified_results = self._cross_validate_results(
-            tavily_result, 
-            ddg_result, 
-            query,
-            max_results
-        )
+        # Tavily 실패 시에만 Serper 시도
+        print(f"⚠️ [Tavily] 실패, Serper.dev 시도...")
+        serper_result = await self._search_serper(query, max_results)
         
-        if verified_results["success"]:
-            print(f"✅ [교차 검증] {len(verified_results['results'])}개 검증된 결과")
-            research_cache.set(query, verified_results, domain="search", prefix="query")
-        else:
-            print(f"⚠️ [교차 검증] 검증 실패, Tavily 결과 사용")
-            if tavily_result.get("success"):
-                verified_results = tavily_result
-            elif ddg_result.get("success"):
-                verified_results = ddg_result
+        if serper_result.get("success"):
+            print(f"✅ [Serper] 결과 확보")
+            research_cache.set(query, serper_result, domain="search", prefix="query")
+            return serper_result
         
-        return verified_results
+        # 둘 다 실패
+        print(f"❌ [검색 실패] Tavily와 Serper 모두 실패")
+        return {
+            "source": "none",
+            "results": [],
+            "success": False,
+            "error": "모든 검색 엔진 실패",
+            "query": query
+        }
     
     def _cross_validate_results(
         self,
@@ -216,55 +217,101 @@ class SearchWithFallback:
             print(f"❌ [Tavily] 오류: {str(e)}")
             return {"success": False}
     
-    async def _search_duckduckgo(
+    async def _search_serper(
         self, 
         query: str, 
         max_results: int
     ) -> Dict[str, Any]:
-        """DuckDuckGo 검색"""
-        try:
-            print(f"🔍 [DuckDuckGo] 검색 중: {query}")
-            
-            results = list(self.ddgs.text(
-                keywords=query,
-                max_results=max_results
-            ))
-            
-            if results:
-                formatted_results = [
-                    {
-                        "title": r.get("title", ""),
-                        "url": r.get("link", ""),
-                        "content": r.get("body", ""),
-                        "score": 0.5,
-                    }
-                    for r in results
-                ]
-                
-                print(f"✅ [DuckDuckGo] {len(formatted_results)}개 결과 발견")
-                return {
-                    "source": "duckduckgo",
-                    "results": formatted_results,
-                    "success": True,
-                    "query": query
-                }
-            
-            print(f"❌ [DuckDuckGo] 결과 없음")
+        """Serper.dev 검색 (Google 검색 결과 제공)"""
+        
+        if not self.serper_api_key:
+            print(f"❌ [Serper] API 키 없음")
             return {
                 "source": "none",
                 "results": [],
                 "success": False,
-                "error": "모든 검색 엔진 실패",
+                "error": "Serper API 키 없음",
+                "query": query
+            }
+        
+        try:
+            print(f"🔍 [Serper] 검색 중: {query}")
+            
+            url = "https://google.serper.dev/search"
+            headers = {
+                'X-API-KEY': self.serper_api_key,
+                'Content-Type': 'application/json'
+            }
+            payload = {
+                'q': query,
+                'num': max_results
+            }
+            
+            # aiohttp로 비동기 요청
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, headers=headers, json=payload, timeout=10) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        
+                        # organic 결과 파싱
+                        organic_results = data.get('organic', [])
+                        
+                        if organic_results:
+                            formatted_results = [
+                                {
+                                    "title": r.get("title", ""),
+                                    "url": r.get("link", ""),
+                                    "content": r.get("snippet", ""),
+                                    "score": 0.8,  # Serper는 Google 검색이라 높은 점수
+                                }
+                                for r in organic_results[:max_results]
+                            ]
+                            
+                            print(f"✅ [Serper] {len(formatted_results)}개 결과 발견")
+                            return {
+                                "source": "serper",
+                                "results": formatted_results,
+                                "success": True,
+                                "query": query
+                            }
+                        
+                        print(f"❌ [Serper] 결과 없음")
+                        return {
+                            "source": "none",
+                            "results": [],
+                            "success": False,
+                            "error": "검색 결과 없음",
+                            "query": query
+                        }
+                    
+                    else:
+                        error_text = await response.text()
+                        print(f"❌ [Serper] HTTP {response.status}: {error_text}")
+                        return {
+                            "source": "none",
+                            "results": [],
+                            "success": False,
+                            "error": f"Serper API 오류: {response.status}",
+                            "query": query
+                        }
+        
+        except asyncio.TimeoutError:
+            print(f"❌ [Serper] 타임아웃")
+            return {
+                "source": "none",
+                "results": [],
+                "success": False,
+                "error": "Serper 타임아웃",
                 "query": query
             }
         
         except Exception as e:
-            print(f"❌ [DuckDuckGo] 오류: {str(e)}")
+            print(f"❌ [Serper] 오류: {str(e)}")
             return {
                 "source": "none",
                 "results": [],
                 "success": False,
-                "error": f"검색 실패: {str(e)}",
+                "error": f"Serper 검색 실패: {str(e)}",
                 "query": query
             }
     
