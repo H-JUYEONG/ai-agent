@@ -10,8 +10,22 @@ load_dotenv()
 app = FastAPI(title="AI Agent Chat")
 
 
-# Static 파일 마운트
-app.mount("/static", StaticFiles(directory="app/static"), name="static")
+# Static 파일 마운트 (캐시 제어)
+from fastapi.responses import FileResponse
+from starlette.staticfiles import StaticFiles as StarletteStaticFiles
+
+class NoCacheStaticFiles(StarletteStaticFiles):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+    
+    def file_response(self, *args, **kwargs):
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+        return response
+
+app.mount("/static", NoCacheStaticFiles(directory="app/static"), name="static")
 
 
 # Router 등록
