@@ -34,15 +34,25 @@ async function sendMessage() {
     const loadingId = showLoading();
     
     try {
-        // API 호출 (현재 도메인 사용)
+        // API 호출 (타임아웃: 120초)
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 120000); // 120초
+        
         const response = await fetch("/api/chat", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ 
                 message: message,
                 domain: currentDomain
-            })
+            }),
+            signal: controller.signal
         });
+        
+        clearTimeout(timeoutId);
+        
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
         
         const data = await response.json();
         removeLoading(loadingId);
@@ -50,7 +60,12 @@ async function sendMessage() {
     } catch (error) {
         console.error("Error:", error);
         removeLoading(loadingId);
-        appendMessage("assistant", "⚠️ 오류가 발생했습니다. 다시 시도해주세요.");
+        
+        if (error.name === 'AbortError') {
+            appendMessage("assistant", "⏱️ 요청 시간이 초과되었습니다. 질문을 단순화하여 다시 시도해주세요.");
+        } else {
+            appendMessage("assistant", "⚠️ 오류가 발생했습니다. 다시 시도해주세요.");
+        }
     }
 }
 
