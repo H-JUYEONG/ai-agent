@@ -12,6 +12,8 @@
 * **데모 URL**: [https://chatboot.shop/](https://chatboot.shop/)
 * **GitHub**: [https://github.com/H-JUYEONG/ai-agent](https://github.com/H-JUYEONG/ai-agent)
 
+![챗봇 화면1](https://github.com/H-JUYEONG/ai-agent/raw/main/chatbot1.png)
+![챗봇 화면2](https://github.com/H-JUYEONG/ai-agent/raw/main/chatbot2.png)
 ---
 
 ## ✨ 주요 기능
@@ -35,8 +37,7 @@
         ├─ research_supervisor (Tavily / DuckDuckGo)
         └─ final_report_generation → 응답 + 캐시 저장
 ```
-![시스템 아키텍처](https://github.com/H-JUYEONG/ai-agent/raw/main/chatbot1.png)
-![시스템 아키텍처](https://github.com/H-JUYEONG/ai-agent/raw/main/chatbot2.png)
+
 ---
 
 ## 🔧 기술 스택
