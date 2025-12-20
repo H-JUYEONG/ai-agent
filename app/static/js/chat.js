@@ -12,7 +12,7 @@ function appendMessageWithOptions() {
     // 메시지 말풍선
     const messageDiv = document.createElement("div");
     messageDiv.className = "message assistant";
-    messageDiv.innerHTML = "안녕하세요! 👋 코딩 AI 도입 의사결정 어시스턴트입니다.<br><br>팀 또는 회사의 상황을 알려주시면, 그에 맞는 코딩 AI 도구를 추천해드립니다.<br><br>다음 정보를 알려주세요:<br>• 💰 <strong>예산</strong> (예: 월 50만원 이하)<br>• 🔒 <strong>보안 요구사항</strong> (예: 코드가 외부로 유출되면 안 됨)<br>• 💻 <strong>사용하는 IDE</strong> (예: VS Code, IntelliJ, PyCharm)<br>• 📋 <strong>업무 특성</strong> (예: 웹 개발, 모바일 앱, 데이터 분석)";
+    messageDiv.innerHTML = "안녕하세요! 👋 코딩 AI 도입 의사결정 어시스턴트입니다.<br><br>개인 또는 팀의 상황을 알려주시면, 그에 맞는 코딩 AI 도구를 추천해드립니다.<br><br>다음 정보를 알려주세요:<br>• 👤 <strong>사용 형태</strong> (예: 개인 사용, 5명 팀)<br>• 💰 <strong>예산</strong> (예: 월 50만원 이하)<br>• 🔒 <strong>보안 요구사항</strong> (예: 코드가 외부로 유출되면 안 됨)<br>• 💻 <strong>사용하는 IDE</strong> (예: VS Code, IntelliJ, PyCharm)<br>• 📋 <strong>업무 특성</strong> (예: 웹 개발, 모바일 앱, 데이터 분석)";
     messages.appendChild(messageDiv);
     messages.scrollTop = messages.scrollHeight;
 }
@@ -114,7 +114,7 @@ function showLoading() {
             <span></span>
         </div>
         <p style="margin-top: 8px; color: #666; font-size: 13px;">
-            🔍 팀 상황에 맞는 코딩 AI 도구를 분석하고 있습니다...
+            🔍 개인/팀 상황에 맞는 코딩 AI 도구를 분석하고 있습니다...
         </p>
     `;
     messages.appendChild(loadingDiv);
