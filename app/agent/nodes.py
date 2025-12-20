@@ -63,9 +63,11 @@ async def clarify_with_user(
     messages = state["messages"]
     domain = state.get("domain", "AI 서비스")
     
-    # 디버깅: 현재 메시지 개수 확인
-    print(f"🔍 [DEBUG] clarify - 전체 메시지 개수: {len(messages)}")
-    print(f"🔍 [DEBUG] clarify - 마지막 메시지: {messages[-1].content[:100] if messages else 'None'}...")
+    # 간단한 판단: Messages 개수만으로
+    is_followup = len(messages) >= 3  # 질문1 + 답변1 + 질문2
+    
+    # 디버깅
+    print(f"🔍 [DEBUG] clarify - Messages: {len(messages)}개, Follow-up: {is_followup}")
     
     model_config = {
         "model": configurable.research_model,
@@ -80,26 +82,10 @@ async def clarify_with_user(
         .with_config(model_config)
     )
     
-    # Messages 개수 확인 및 참조 표현 확인
-    is_followup = False
-    if len(messages) >= 3:  # 질문1 + 답변1 + 질문2
-        last_user_msg = messages[-1].content.lower() if messages else ""
-        # 참조 표현 확인 (확장된 키워드)
-        followup_keywords = [
-            "방금", "앞서", "위에서", "추천해준", "말한",
-            "중에서", "하나만", "최종", "1순위", "2순위", 
-            "이중", "그중", "이 조건", "포기"
-        ]
-        if any(keyword in last_user_msg for keyword in followup_keywords):
-            is_followup = True
-    
-    print(f"🔍 [DEBUG] clarify - Follow-up 판단: {is_followup} (Messages: {len(messages)}개)")
-    
     prompt_content = clarify_with_user_instructions.format(
         messages=get_buffer_string(messages),
         date=get_today_str(),
         domain=domain,
-        message_count=len(messages),
         is_followup="YES" if is_followup else "NO"
     )
     
@@ -149,30 +135,22 @@ async def write_research_brief(
     except KeyError:
         formatted_domain_guide_for_research = domain_guide
     
-    # Messages 개수 및 Follow-up 확인
+    # Messages 가져오기 및 Follow-up 판단
     messages_list = state.get("messages", [])
-    is_followup = False
+    is_followup = len(messages_list) >= 3
+    
+    # 이전 도구 추출 (Follow-up인 경우)
     previous_tools = ""
+    if is_followup:
+        import re
+        for msg in reversed(messages_list[:-1]):
+            if hasattr(msg, 'content'):
+                tools_found = re.findall(r'📊\s+([^\n]+)', str(msg.content))
+                if tools_found:
+                    previous_tools = ", ".join(tools_found[:10])
+                    break
     
-    if len(messages_list) >= 3:
-        last_user_msg = messages_list[-1].content.lower() if messages_list else ""
-        followup_keywords = [
-            "방금", "앞서", "위에서", "추천해준", "말한",
-            "중에서", "하나만", "최종", "1순위", "2순위", 
-            "이중", "그중", "이 조건", "포기"
-        ]
-        if any(keyword in last_user_msg for keyword in followup_keywords):
-            is_followup = True
-            # 이전 AI 응답에서 도구명 추출 (📊로 시작하는 줄)
-            import re
-            for msg in reversed(messages_list[:-1]):  # 마지막 메시지 제외
-                if hasattr(msg, 'content'):
-                    tools_found = re.findall(r'📊\s+([^\n]+)', str(msg.content))
-                    if tools_found:
-                        previous_tools = ", ".join(tools_found[:10])  # 최대 10개
-                        break
-    
-    print(f"🔍 [DEBUG] write_research_brief - Follow-up: {is_followup}, 이전 도구: {previous_tools}")
+    print(f"🔍 [DEBUG] write_research_brief - Messages: {len(messages_list)}개, Follow-up: {is_followup}, 이전 도구: {previous_tools}")
     
     prompt_content = transform_messages_into_research_topic_prompt.format(
         messages=get_buffer_string(messages_list),
@@ -181,7 +159,6 @@ async def write_research_brief(
         current_month_year=get_current_month_year(),
         domain=domain,
         domain_guide=formatted_domain_guide_for_research,
-        message_count=len(messages_list),
         is_followup="YES" if is_followup else "NO",
         previous_tools=previous_tools if previous_tools else "없음"
     )
@@ -585,37 +562,28 @@ async def final_report_generation(state: AgentState, config: RunnableConfig):
         "api_key": get_api_key_for_model(configurable.final_report_model, config),
     }
     
-    # Messages 개수 및 Follow-up 확인
+    # Messages 가져오기 및 Follow-up 판단
     messages_list = state.get("messages", [])
-    is_followup = False
+    is_followup = len(messages_list) >= 3
+    
+    # 이전 도구 추출 (Follow-up인 경우)
     previous_tools = ""
+    if is_followup:
+        import re
+        for msg in reversed(messages_list[:-1]):
+            if hasattr(msg, 'content'):
+                tools_found = re.findall(r'📊\s+([^\n]+)', str(msg.content))
+                if tools_found:
+                    previous_tools = ", ".join(tools_found[:10])
+                    break
     
-    if len(messages_list) >= 3:
-        last_user_msg = messages_list[-1].content.lower() if messages_list else ""
-        followup_keywords = [
-            "방금", "앞서", "위에서", "추천해준", "말한",
-            "중에서", "하나만", "최종", "1순위", "2순위", 
-            "이중", "그중", "이 조건", "포기"
-        ]
-        if any(keyword in last_user_msg for keyword in followup_keywords):
-            is_followup = True
-            # 이전 AI 응답에서 도구명 추출
-            import re
-            for msg in reversed(messages_list[:-1]):
-                if hasattr(msg, 'content'):
-                    tools_found = re.findall(r'📊\s+([^\n]+)', str(msg.content))
-                    if tools_found:
-                        previous_tools = ", ".join(tools_found[:10])
-                        break
-    
-    print(f"🔍 [DEBUG] final_report - Follow-up: {is_followup}, Messages: {len(messages_list)}개, 이전 도구: {previous_tools}")
+    print(f"🔍 [DEBUG] final_report - Messages: {len(messages_list)}개, Follow-up: {is_followup}, 이전 도구: {previous_tools}")
     
     final_prompt = final_report_generation_prompt.format(
         research_brief=state.get("research_brief", ""),
         messages=get_buffer_string(messages_list),
         findings=findings,
         date=get_today_str(),
-        message_count=len(messages_list),
         is_followup="YES" if is_followup else "NO",
         previous_tools=previous_tools if previous_tools else "없음"
     )

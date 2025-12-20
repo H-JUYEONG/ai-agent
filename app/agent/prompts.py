@@ -88,19 +88,16 @@ clarify_with_user_instructions = """
 오늘 날짜: {date}
 선택된 도메인: {domain}
 
-**📊 자동 판단 결과 (반드시 따르세요!):**
-- Messages 개수: {message_count}개
-- Follow-up 여부: {is_followup}
+**🔍 1단계: Follow-up 여부 확인**
 
-**🔍 판단 기준:**
-- is_followup이 "YES"면 → **Follow-up 질문**
-- is_followup이 "NO"면 → **처음 질문**
+- is_followup = {is_followup}
 
-**Follow-up 질문인 경우 (is_followup = YES):**
+**Follow-up인 경우 (is_followup = YES):**
 - verification: "네! 조건에 맞는 도구를 분석해드리겠습니다."
 
 **처음 질문인 경우 (is_followup = NO):**
-- verification: "네! Python 데이터 분석 팀에 적합한 최신 코딩 AI 도구들을 조사해드리겠습니다."
+- 사용자 질문의 내용에 맞는 자연스러운 시작 메시지
+- 예: "네! Python 데이터 분석 팀에 적합한 최신 코딩 AI 도구들을 조사해드리겠습니다."
 
 **🔍 2단계: 명확화 필요 여부 판단**
 
@@ -140,23 +137,17 @@ transform_messages_into_research_topic_prompt = """
 
 {domain_guide}
 
-**📊 자동 판단 결과 (반드시 따르세요!):**
-- Messages 개수: {message_count}개
-- Follow-up 여부: {is_followup}
-- 이전 추천 도구: {previous_tools}
+**🔍 1단계: Follow-up 여부 확인**
 
-**🔍 판단 기준:**
-- is_followup이 "YES"면 → **Follow-up 질문**
-- is_followup이 "NO"면 → **처음 질문**
+- is_followup = {is_followup}
+- 이전 추천 도구 = {previous_tools}
 
 **🔍 2단계: 연구 질문 작성**
 
 **Follow-up 질문인 경우 (is_followup = YES):**
-- **이전 추천 도구**: {previous_tools}
-- **연구 질문**: "이전에 추천한 **{previous_tools}** 중에서 사용자의 조건에 가장 적합한 1순위와 2순위를 선정해주세요. **오직 이 도구들만 고려하세요.**"
-- 새로운 도구 검색 절대 금지!
-  
-**🚨 중요**: 연구 질문에 {previous_tools}를 **그대로** 포함하세요!
+- 이전 추천 도구: {previous_tools}
+- **연구 질문**: "이전에 추천한 {previous_tools} 중에서 사용자의 조건에 가장 적합한 도구를 선정해주세요. **오직 이 도구들만 고려하세요.**"
+- ⚠️ 새로운 도구 검색 절대 금지!
 
 **처음 질문인 경우 (is_followup = NO):**
 - 최신 도구 검색 필요
@@ -528,36 +519,32 @@ final_report_generation_prompt = """
 {messages}
 </Messages>
 
-**📊 자동 판단 결과 (반드시 따르세요!):**
-- Messages 개수: {message_count}개
-- Follow-up 여부: {is_followup}
-- 이전 추천 도구: {previous_tools}
+**🔍 0단계: Follow-up 여부 확인**
 
-**🚨 가장 중요 (반드시 준수!) 🚨**
+- is_followup = {is_followup}
+- 이전 추천 도구 = {previous_tools}
 
-0. **이전 대화 맥락 활용**
+**🚨 리포트 작성 규칙 (절대 준수!):**
+
+**Follow-up 질문인 경우 (is_followup = YES):**
+- **오직 {previous_tools}만 리포트에 포함**
+- 새로운 도구 절대 추가 금지!
+- 예: previous_tools가 "GitHub Copilot, Kite, Tabnine"이면
+  → 리포트에는 **오직 이 3개만** 포함
+  → Cursor, Replit 같은 새 도구 절대 금지!
    
-   **Follow-up인 경우 (is_followup = YES):**
-   - **오직 {previous_tools}만 리포트에 포함**
-   - 새로운 도구 절대 추가 금지!
-   - 예: 이전 도구가 "Aider, Cursor, GitHub Copilot"이면
-     → **Replit, Tabnine 같은 새로운 도구 절대 금지!**
-     → Aider, Cursor, GitHub Copilot 중에서만 선택
+**처음 질문인 경우 (is_followup = NO):**
+- 연구 결과의 모든 도구 포함 가능
    
-   **처음 질문인 경우 (is_followup = NO):**
-   - 연구 결과의 모든 도구 포함 가능
+**🔍 인사말 작성 규칙:**
    
-   **🔍 Step 3: 인사말 작성**
+**Follow-up 질문인 경우 (is_followup = YES):**
+- **형식**: `[GREETING]네! 귀하의 조건에 맞춰 재분석했습니다.[/GREETING]`
+- 이 형식을 **반드시** 사용!
    
-   **Follow-up인 경우 (is_followup = YES):**
-   - **형식**: `[GREETING]네! 귀하의 조건에 맞춰 재분석했습니다.[/GREETING]`
-   - 이 형식을 **반드시** 사용하세요!
-   
-   **처음 질문인 경우 (is_followup = NO):**
-   - 인사말 없이 바로 🔍 제목으로 시작
-   - **절대 [GREETING] 태그 사용하지 마세요!**
-   
-   **🚨 중요**: is_followup 값을 **반드시** 따르세요!
+**처음 질문인 경우 (is_followup = NO):**
+- 인사말 없이 바로 🔍 제목으로 시작
+- **절대 [GREETING] 태그 사용 금지!**
 
 1. **정보는 연구 결과(Findings)에서만 가져오기**
    - 가격, 기능, IDE 지원 등 모든 정보는 연구 결과에서만
@@ -581,7 +568,9 @@ final_report_generation_prompt = """
 
 <리포트 구조 - 반드시 이 형식을 따르세요>
 
-**🚨 중요: is_followup 값으로 판단!**
+**🔍 Follow-up 여부:**
+- is_followup = {is_followup}
+- 이전 추천 도구 = {previous_tools}
 
 **Follow-up 질문인 경우 (is_followup = YES):**
 
@@ -591,8 +580,6 @@ final_report_generation_prompt = """
 
 (부제: 사용자 조건에 맞는 도구 분석)
 
-**🚨 중요: 오직 {previous_tools}만 리포트에 포함! 다른 도구 절대 추가 금지!**
-
 **처음 질문인 경우 (is_followup = NO):**
 
 🔍 December 2025 기준 코딩 AI 도구 추천
@@ -600,18 +587,17 @@ final_report_generation_prompt = """
 (부제: 개인/팀 상황에 따라 구체적으로 명시)
 
 **절대 금지**: 
-- is_followup 값을 무시하지 마세요!
 - Follow-up인데 새로운 도구 추가하지 마세요!
 - 처음 질문인데 [GREETING] 태그 사용하지 마세요!
 - 마크다운 코드 블록(```)으로 리포트를 감싸지 마세요!
 
 **리포트 본문:**
 
-**🚨 Follow-up인 경우 (is_followup = YES) 절대 준수!**
+**🚨 Follow-up 질문인 경우 (is_followup = YES) 절대 준수!**
 - **오직 {previous_tools}만 리포트에 포함**
-- 예: previous_tools가 "Aider, Cursor, GitHub Copilot, Claude Code"이면
-  → **Replit, Tabnine 같은 새로운 도구 절대 금지!**
-  → Aider, Cursor, GitHub Copilot, Claude Code 중에서만 선택
+- 예: previous_tools가 "GitHub Copilot, Kite, Tabnine"이면
+  → 리포트에는 **오직 이 3개만** 포함
+  → Cursor, Replit 같은 새 도구 절대 금지!
   
 **처음 질문인 경우 (is_followup = NO):**
 - 연구 결과의 모든 도구 포함 가능
