@@ -150,7 +150,18 @@ async def write_research_brief(
                     previous_tools = ", ".join(tools_found[:10])
                     break
     
-    print(f"🔍 [DEBUG] write_research_brief - Messages: {len(messages_list)}개, Follow-up: {is_followup}, 이전 도구: {previous_tools}")
+    # 질문 유형 판단
+    last_user_msg = messages_list[-1].content.lower() if messages_list else ""
+    question_type = "comparison"  # 기본값
+    
+    if any(kw in last_user_msg for kw in ["하나만", "최종", "결정", "선택"]):
+        question_type = "decision"
+    elif any(kw in last_user_msg for kw in ["왜", "이유", "차이", "포기", "설명"]):
+        question_type = "explanation"
+    elif any(kw in last_user_msg for kw in ["가격", "얼마", "비용", "어떤 기능"]):
+        question_type = "information"
+    
+    print(f"🔍 [DEBUG] write_research_brief - Messages: {len(messages_list)}개, Follow-up: {is_followup}, 질문유형: {question_type}, 이전 도구: {previous_tools}")
     
     prompt_content = transform_messages_into_research_topic_prompt.format(
         messages=get_buffer_string(messages_list),
@@ -160,7 +171,8 @@ async def write_research_brief(
         domain=domain,
         domain_guide=formatted_domain_guide_for_research,
         is_followup="YES" if is_followup else "NO",
-        previous_tools=previous_tools if previous_tools else "없음"
+        previous_tools=previous_tools if previous_tools else "없음",
+        question_type=question_type
     )
     
     response = await research_model.ainvoke([HumanMessage(content=prompt_content)])
@@ -577,7 +589,18 @@ async def final_report_generation(state: AgentState, config: RunnableConfig):
                     previous_tools = ", ".join(tools_found[:10])
                     break
     
-    print(f"🔍 [DEBUG] final_report - Messages: {len(messages_list)}개, Follow-up: {is_followup}, 이전 도구: {previous_tools}")
+    # 질문 유형 판단
+    last_user_msg = messages_list[-1].content.lower() if messages_list else ""
+    question_type = "comparison"  # 기본값
+    
+    if any(kw in last_user_msg for kw in ["하나만", "최종", "결정", "선택"]):
+        question_type = "decision"
+    elif any(kw in last_user_msg for kw in ["왜", "이유", "차이", "포기", "설명"]):
+        question_type = "explanation"
+    elif any(kw in last_user_msg for kw in ["가격", "얼마", "비용", "어떤 기능"]):
+        question_type = "information"
+    
+    print(f"🔍 [DEBUG] final_report - Messages: {len(messages_list)}개, Follow-up: {is_followup}, 질문유형: {question_type}, 이전 도구: {previous_tools}")
     
     final_prompt = final_report_generation_prompt.format(
         research_brief=state.get("research_brief", ""),
@@ -585,7 +608,8 @@ async def final_report_generation(state: AgentState, config: RunnableConfig):
         findings=findings,
         date=get_today_str(),
         is_followup="YES" if is_followup else "NO",
-        previous_tools=previous_tools if previous_tools else "없음"
+        previous_tools=previous_tools if previous_tools else "없음",
+        question_type=question_type
     )
     
     try:

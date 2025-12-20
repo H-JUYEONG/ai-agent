@@ -137,10 +137,17 @@ transform_messages_into_research_topic_prompt = """
 
 {domain_guide}
 
-**🔍 1단계: Follow-up 여부 확인**
+**🔍 1단계: 상황 파악**
 
 - is_followup = {is_followup}
 - 이전 추천 도구 = {previous_tools}
+- 질문 유형 = {question_type}
+
+**질문 유형 설명:**
+- **comparison**: 비교/추천 요청 (여러 도구 조사 필요)
+- **decision**: 의사결정 요청 (최종 선택 도움)
+- **explanation**: 설명 요청 (이유/차이 설명)
+- **information**: 정보 요청 (간단한 정보)
 
 **🔍 2단계: 연구 질문 작성**
 
@@ -519,10 +526,22 @@ final_report_generation_prompt = """
 {messages}
 </Messages>
 
-**🔍 0단계: Follow-up 여부 확인**
+**🔍 0단계: 상황 파악 (반드시 확인!)**
 
 - is_followup = {is_followup}
 - 이전 추천 도구 = {previous_tools}
+- **질문 유형 = {question_type}** ← 이 값에 따라 답변 형식이 완전히 달라집니다!
+
+**질문 유형 설명:**
+- **comparison**: 비교/추천 요청 → 📊 도구 리스트 형식 (상세 비교)
+- **decision**: 의사결정 요청 → 🎯 짧고 명확한 결론 형식 (하나 선택)
+- **explanation**: 설명 요청 → 💡 자유로운 설명 형식 (이유/차이)
+- **information**: 정보 요청 → 📌 간단한 정보 형식 (팩트만)
+
+**🚨 매우 중요:**
+- question_type = "{question_type}" 값을 반드시 확인하세요!
+- 각 유형마다 답변 형식이 완전히 다릅니다!
+- 인사말도 사용자의 구체적인 질문 내용에 맞춰 자연스럽게 작성하세요!
 
 **🚨 리포트 작성 규칙 (절대 준수!):**
 
@@ -568,39 +587,107 @@ final_report_generation_prompt = """
 
 <리포트 구조 - 반드시 이 형식을 따르세요>
 
-**🔍 Follow-up 여부:**
+**🔍 상황 파악:**
 - is_followup = {is_followup}
 - 이전 추천 도구 = {previous_tools}
+- 질문 유형 = {question_type}
 
-**Follow-up 질문인 경우 (is_followup = YES):**
+**🎯 질문 유형별 답변 형식 (반드시 따르세요!):**
 
-[GREETING]네! 귀하의 조건에 맞춰 재분석했습니다.[/GREETING]
+**🚨 중요: question_type = {question_type} 값을 반드시 확인하고 그에 맞는 형식 사용!**
+
+---
+
+**1. question_type = "comparison" (비교/추천)** → 📊 도구 리스트 형식
+
+**Follow-up인 경우:**
+[GREETING]네! 조건에 맞춰 다시 분석해드리겠습니다.[/GREETING]
 
 🔍 December 2025 기준 코딩 AI 도구 추천
-
 (부제: 사용자 조건에 맞는 도구 분석)
 
-**처음 질문인 경우 (is_followup = NO):**
+📊 [도구명 1]
+💰 가격...
+(전체 템플릿 사용)
 
+**처음 질문인 경우:**
 🔍 December 2025 기준 코딩 AI 도구 추천
-
 (부제: 개인/팀 상황에 따라 구체적으로 명시)
 
-**절대 금지**: 
+📊 [도구명 1]
+💰 가격...
+(전체 템플릿 사용)
+
+---
+
+**2. question_type = "decision" (의사결정)** → 짧고 명확한 결론
+
+**Follow-up인 경우, 사용자 질문에 맞춰 인사말 자연스럽게 작성:**
+- "하나만 고르면?" → [GREETING]네! 최종 선택을 도와드리겠습니다.[/GREETING]
+- "어떤 걸 골라야 해?" → [GREETING]명확하게 결정해드리겠습니다.[/GREETING]
+- "결정을 도와줘" → [GREETING]최적의 선택을 추천해드리겠습니다.[/GREETING]
+
+## 🎯 최종 추천: [도구명]
+
+**선택 이유:**
+1. [핵심 이유 1 - 구체적으로]
+2. [핵심 이유 2 - 구체적으로]
+3. [핵심 이유 3 - 구체적으로]
+
+**간단 비교:**
+- **[추천 도구]**: [장점 요약 1-2줄]
+- **[대안 도구]**: [단점/부족한 점 1-2줄]
+
+**결론:**
+[확신을 주는 한 줄 요약]
+
+---
+
+**3. question_type = "explanation" (설명)** → 자유로운 설명
+
+**Follow-up인 경우, 사용자 질문에 맞춰 인사말 자연스럽게 작성:**
+- "왜 그래?" → [GREETING]이유를 자세히 설명해드리겠습니다.[/GREETING]
+- "차이가 뭐야?" → [GREETING]두 도구의 차이를 명확히 알려드리겠습니다.[/GREETING]
+- "포기해도 돼?" → [GREETING]그 부분에 대해 설명해드리겠습니다.[/GREETING]
+
+## 💡 [질문 주제를 간결하게]
+
+[자유롭고 자연스러운 설명 - 2-4단락]
+
+**핵심 정리:**
+- [포인트 1]
+- [포인트 2]
+- [포인트 3]
+
+---
+
+**4. question_type = "information" (정보)** → 간단 정보
+
+**Follow-up인 경우, 사용자 질문에 맞춰 인사말 자연스럽게 작성:**
+- "가격이 얼마야?" → [GREETING]가격 정보를 알려드리겠습니다.[/GREETING]
+- "어떤 기능?" → [GREETING]주요 기능을 정리해드리겠습니다.[/GREETING]
+
+## 📌 [정보 주제]
+
+[간단하고 명확한 정보 제공 - 3-5줄]
+
+---
+
+**절대 금지:** 
 - Follow-up인데 새로운 도구 추가하지 마세요!
 - 처음 질문인데 [GREETING] 태그 사용하지 마세요!
-- 마크다운 코드 블록(```)으로 리포트를 감싸지 마세요!
+- 마크다운 코드 블록(```)으로 감싸지 마세요!
+- **comparison이 아닌데 📊 도구 리스트 형식 사용하지 마세요!**
 
-**리포트 본문:**
+**🚨 Follow-up 질문인 경우 절대 준수!**
+- **오직 {previous_tools}만 사용**
+- 예: previous_tools가 "GitHub Copilot, Cursor"이면
+  → **오직 이 2개만** 언급
+  → Tabnine, Replit 같은 새 도구 절대 금지!
 
-**🚨 Follow-up 질문인 경우 (is_followup = YES) 절대 준수!**
-- **오직 {previous_tools}만 리포트에 포함**
-- 예: previous_tools가 "GitHub Copilot, Kite, Tabnine"이면
-  → 리포트에는 **오직 이 3개만** 포함
-  → Cursor, Replit 같은 새 도구 절대 금지!
-  
-**처음 질문인 경우 (is_followup = NO):**
-- 연구 결과의 모든 도구 포함 가능
+**📋 질문 유형별 세부 템플릿:**
+
+**질문 유형 = comparison (비교/추천)일 때만 이 템플릿 사용!**
 
 # 🔍 December 2025 기준 코딩 AI 도구 추천
 
