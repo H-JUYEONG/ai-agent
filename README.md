@@ -35,7 +35,8 @@
         ├─ research_supervisor (Tavily / DuckDuckGo)
         └─ final_report_generation → 응답 + 캐시 저장
 ```
-
+![시스템 아키텍처](https://github.com/H-JUYEONG/ai-agent/raw/main/chatbot1.png)
+![시스템 아키텍처](https://github.com/H-JUYEONG/ai-agent/raw/main/chatbot2.png)
 ---
 
 ## 🔧 기술 스택
