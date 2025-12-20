@@ -2,7 +2,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, AIMessage
 import os
 import time
 
@@ -17,6 +17,7 @@ templates = Jinja2Templates(directory="app/templates")
 class ChatRequest(BaseModel):
     message: str
     domain: str = "코딩"  # 항상 코딩으로 고정
+    history: list = []  # 이전 대화 이력
 
 
 @router.get("/", response_class=HTMLResponse)
@@ -55,10 +56,25 @@ async def chat(req: ChatRequest):
                 "reply": "⚠️ OpenAI API 키가 설정되지 않았습니다. .env 파일을 확인해주세요."
             }
         
+        # 대화 이력 구성
+        messages_to_send = []
+        
+        # 이전 대화 이력 추가
+        for msg in req.history:
+            if msg.get("role") == "user":
+                messages_to_send.append(HumanMessage(content=msg.get("content", "")))
+            elif msg.get("role") == "assistant":
+                messages_to_send.append(AIMessage(content=msg.get("content", "")))
+        
+        # 현재 사용자 메시지 추가
+        messages_to_send.append(HumanMessage(content=req.message))
+        
+        print(f"🔍 [DEBUG] chat.py - 전송할 Messages 개수: {len(messages_to_send)}개")
+        
         # LangGraph 실행
         result = await deep_researcher.ainvoke(
             {
-                "messages": [HumanMessage(content=req.message)],
+                "messages": messages_to_send,
                 "domain": domain
             },
             config={
@@ -69,23 +85,38 @@ async def chat(req: ChatRequest):
         )
         
         # 최종 리포트 추출
-        final_report = result.get("final_report", "")
+        messages = result.get("messages", [])
         
-        if not final_report:
-            # messages에서 마지막 AI 메시지 추출
-            messages = result.get("messages", [])
-            if messages:
-                final_report = messages[-1].content
+        # AI 메시지만 추출 (마지막 N개)
+        ai_messages = [msg for msg in messages if isinstance(msg, AIMessage)]
         
-        # 3. 캐시 저장
-        cache_data = {"reply": final_report}
+        # 마지막 2개의 AI 메시지 확인 (인사말 + 리포트 분리)
+        if len(ai_messages) >= 2:
+            # 마지막 2개 메시지 반환 (리스트로)
+            reply_messages = [ai_messages[-2].content, ai_messages[-1].content]
+            print(f"✅ [DEBUG] 2개 메시지 감지: {len(reply_messages)}개")
+        elif len(ai_messages) == 1:
+            # 1개만 있으면 그대로 반환
+            reply_messages = [ai_messages[-1].content]
+            print(f"✅ [DEBUG] 1개 메시지 감지")
+        else:
+            # 메시지 없으면 final_report 사용
+            final_report = result.get("final_report", "")
+            reply_messages = [final_report] if final_report else ["응답을 생성하지 못했습니다."]
+        
+        # 3. 캐시 저장 (마지막 메시지만)
+        cache_data = {"reply": reply_messages[-1] if reply_messages else ""}
         research_cache.set(req.message, cache_data, domain)
         
         # 종료 시간 계산
         elapsed_time = time.time() - start_time
         print(f"✅ Deep Research 완료 (소요 시간: {elapsed_time:.2f}초)")
         
-        return {"reply": final_report}
+        # 여러 메시지면 배열로, 하나면 문자열로 반환
+        if len(reply_messages) > 1:
+            return {"reply": reply_messages}
+        else:
+            return {"reply": reply_messages[0]}
     
     except Exception as e:
         error_msg = f"❌ 오류 발생: {str(e)}"

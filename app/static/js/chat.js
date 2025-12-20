@@ -20,6 +20,9 @@ function appendMessageWithOptions() {
 // 도메인은 항상 코딩으로 고정
 let currentDomain = "코딩";
 
+// 대화 이력 저장
+let conversationHistory = [];
+
 // 메시지 전송
 async function sendMessage() {
     const input = document.getElementById("userInput");
@@ -34,16 +37,17 @@ async function sendMessage() {
     const loadingId = showLoading();
     
     try {
-        // API 호출 (타임아웃: 120초)
+        // API 호출 (타임아웃: 180초)
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 120000); // 120초
+        const timeoutId = setTimeout(() => controller.abort(), 180000); // 180초 (3분)
         
         const response = await fetch("/api/chat", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ 
                 message: message,
-                domain: currentDomain
+                domain: currentDomain,
+                history: conversationHistory  // 대화 이력 전달
             }),
             signal: controller.signal
         });
@@ -56,7 +60,34 @@ async function sendMessage() {
         
         const data = await response.json();
         removeLoading(loadingId);
-        appendMessage("assistant", data.reply);
+        
+        // 사용자 메시지를 이력에 추가
+        conversationHistory.push({
+            role: "user",
+            content: message
+        });
+        
+        // 배열이면 여러 메시지로, 문자열이면 하나의 메시지로
+        if (Array.isArray(data.reply)) {
+            // 여러 메시지를 순차적으로 추가
+            data.reply.forEach((msg, index) => {
+                setTimeout(() => {
+                    appendMessage("assistant", msg);
+                }, index * 500); // 0.5초 간격으로 추가
+            });
+            // AI 응답을 이력에 추가 (마지막 메시지만)
+            conversationHistory.push({
+                role: "assistant",
+                content: data.reply[data.reply.length - 1]
+            });
+        } else {
+            appendMessage("assistant", data.reply);
+            // AI 응답을 이력에 추가
+            conversationHistory.push({
+                role: "assistant",
+                content: data.reply
+            });
+        }
     } catch (error) {
         console.error("Error:", error);
         removeLoading(loadingId);
@@ -142,6 +173,9 @@ function formatMarkdown(text) {
 function clearChat() {
     const messages = document.getElementById("messages");
     messages.innerHTML = '';
+    
+    // 대화 이력 초기화
+    conversationHistory = [];
     
     // AI 환영 메시지 다시 표시
     setTimeout(() => {

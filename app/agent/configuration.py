@@ -12,11 +12,11 @@ class Configuration(BaseModel):
     # 일반 설정
     max_structured_output_retries: int = Field(default=3)
     allow_clarification: bool = Field(default=False)  # 빠른 시작을 위해 False
-    max_concurrent_research_units: int = Field(default=5)  # 병렬 연구 최대 5개
+    max_concurrent_research_units: int = Field(default=3)  # 병렬 연구 최대 3개 (속도 향상!)
     
     # 연구 설정
     max_researcher_iterations: int = Field(default=1)  # 1회 반복
-    max_react_tool_calls: int = Field(default=5)  # 각 researcher 5번 검색 (가격 정보 반드시 찾기!)
+    max_react_tool_calls: int = Field(default=3)  # 각 researcher 3번 검색 (속도 향상!)
     
     # 모델 설정 (비용 최적화 - 모두 mini 사용!)
     research_model: str = Field(default="gpt-4o-mini")
