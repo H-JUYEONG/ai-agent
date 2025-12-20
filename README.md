@@ -17,7 +17,6 @@
   <img src="https://github.com/H-JUYEONG/ai-agent/raw/main/chatbot2.png" width="300" />
   <img src="https://github.com/H-JUYEONG/ai-agent/raw/main/chatbot3.png" width="300" />
 </p>
----
 
 ## ✨ 주요 기능
 
