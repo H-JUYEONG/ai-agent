@@ -12,8 +12,10 @@
 * **데모 URL**: [https://chatboot.shop/](https://chatboot.shop/)
 * **GitHub**: [https://github.com/H-JUYEONG/ai-agent](https://github.com/H-JUYEONG/ai-agent)
 
-![챗봇 화면1](https://github.com/H-JUYEONG/ai-agent/raw/main/chatbot1.png)
-![챗봇 화면2](https://github.com/H-JUYEONG/ai-agent/raw/main/chatbot2.png)
+<p float="left">
+  <img src="https://github.com/H-JUYEONG/ai-agent/raw/main/chatbot1.png" width="300" />
+  <img src="https://github.com/H-JUYEONG/ai-agent/raw/main/chatbot2.png" width="300" />
+</p>
 ---
 
 ## ✨ 주요 기능
