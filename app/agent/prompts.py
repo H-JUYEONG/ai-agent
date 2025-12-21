@@ -88,6 +88,34 @@ clarify_with_user_instructions = """
 오늘 날짜: {date}
 선택된 도메인: {domain}
 
+**🔍 0단계: 주제 관련성 판단 (가장 먼저!)**
+
+사용자 질문이 **코딩 AI 도구 추천**과 관련 있는지 판단하세요.
+
+**관련 있는 질문 예시:**
+- ✅ "코딩 AI 추천해줘"
+- ✅ "GitHub Copilot vs Cursor 비교"
+- ✅ "팀에서 쓸 AI 도구 찾아줘"
+- ✅ "무료 코드 자동완성 도구"
+- ✅ "VS Code에서 쓸 수 있는 AI 어시스턴트"
+- ✅ "AI 페어 프로그래밍 도구"
+
+**관련 없는 질문 예시:**
+- ❌ "오늘 날씨 어때?"
+- ❌ "맛집 추천해줘"
+- ❌ "Python 문법 알려줘"
+- ❌ "영어 번역해줘"
+- ❌ "여행지 추천"
+
+**판단 기준:**
+- 코딩 AI, AI 어시스턴트, 자동완성, Copilot, Cursor 같은 키워드가 있으면 관련 있음
+- 개발, 프로그래밍, IDE와 관련된 AI 도구 질문이면 관련 있음
+- 완전히 다른 주제(날씨, 음식, 여행 등)는 관련 없음
+
+**주제에서 벗어난 경우 (is_on_topic = false):**
+- off_topic_message에 정중한 거부 메시지 작성
+- 예: "죄송합니다. 저는 코딩 AI 도구 추천을 전문으로 하는 챗봇입니다. 다시시 말씀해주세요!"
+
 **🔍 1단계: Follow-up 여부 확인**
 
 - is_followup = {is_followup}
@@ -119,10 +147,16 @@ clarify_with_user_instructions = """
 
 JSON 형식으로 응답:
 {{
-  "need_clarification": true/false,
-  "question": "명확화 질문 (간단명료하게!)",
-  "verification": "연구 시작 확인 메시지 (Follow-up이면 이전 대화 참고 멘트 포함!)"
+  "is_on_topic": true/false,
+  "need_clarification": true/false (주제가 맞는 경우만),
+  "question": "명확화 질문 (need_clarification이 true인 경우만)",
+  "verification": "연구 시작 확인 메시지 (주제가 맞고 명확화가 불필요한 경우)",
+  "off_topic_message": "주제에서 벗어난 경우 거부 메시지 (is_on_topic이 false인 경우만)"
 }}
+
+**중요:**
+- is_on_topic = false이면: off_topic_message만 채우고 나머지는 빈 문자열
+- is_on_topic = true이면: verification 또는 question을 채우고 off_topic_message는 빈 문자열
 """
 
 
@@ -153,7 +187,21 @@ transform_messages_into_research_topic_prompt = """
 
 **Follow-up 질문인 경우 (is_followup = YES):**
 - 이전 추천 도구: {previous_tools}
-- **연구 질문**: "이전에 추천한 {previous_tools} 중에서 사용자의 조건에 가장 적합한 도구를 선정해주세요. **오직 이 도구들만 고려하세요.**"
+- **질문 유형별 연구 질문:**
+  
+  * **information (정보 요청)**: 
+    - 선호도/인기도 질문: "이전에 추천한 {previous_tools} 중에서 **사용자 선호도, 인기도, 사용자 수, 커뮤니티 활동**을 비교하고 순위를 매겨주세요. **오직 이 도구들만 고려하세요.**"
+    - 일반 정보 질문: "이전에 추천한 {previous_tools}의 [질문 내용]에 대한 정보를 제공해주세요."
+  
+  * **decision (의사결정)**: 
+    - "이전에 추천한 {previous_tools} 중에서 사용자의 조건에 **가장 적합한 도구를 선정**해주세요. **오직 이 도구들만 고려하세요.**"
+  
+  * **explanation (설명)**: 
+    - "이전에 추천한 {previous_tools}에 대해 사용자의 질문(이유/차이)을 설명해주세요."
+  
+  * **comparison (비교)**: 
+    - "이전에 추천한 {previous_tools}를 사용자의 조건에 맞춰 비교 분석해주세요."
+
 - ⚠️ 새로운 도구 검색 절대 금지!
 
 **처음 질문인 경우 (is_followup = NO):**
@@ -173,8 +221,11 @@ transform_messages_into_research_topic_prompt = """
 입력: "코딩 AI 추천해줘"
 출력: "December 2025 기준 가장 인기있는 최신 코딩 AI 도구들을 조사하고, 각 도구의 최신 가격, 주요 기능, IDE 지원, 장단점을 상세히 비교 분석해주세요."
 
-입력 (Follow-up): "방금 추천해준 것 중에서 5명 팀, 월 100만원 예산에 맞는 1, 2순위 추천해줘"
+입력 (Follow-up, decision): "방금 추천해준 것 중에서 5명 팀, 월 100만원 예산에 맞는 1, 2순위 추천해줘"
 출력: "사용자의 조건(5명 규모 팀, 월 100만원 예산)에 맞춰 이전에 추천한 도구들을 상세 분석하고, 가격 대비 효율성, 팀 협업 기능, 예산 적합성을 기준으로 1순위와 2순위를 선정해주세요."
+
+입력 (Follow-up, information): "지금 추천해준 3개 중에 사람들이 더 많이 사용하는 건? 선호도?"
+출력: "이전에 추천한 도구들(Replit, Tabnine, Qodo)의 사용자 선호도, 인기도, 사용자 수, GitHub 스타 수, 커뮤니티 활동을 December 2025 기준으로 비교하고 인기도 순위를 매겨주세요."
 
 입력: "개인 사용, VS Code, 웹 개발"
 출력: "December 2025 기준 개인 개발자가 VS Code에서 웹 개발에 사용하기 좋은 최신 코딩 AI 도구들을 조사하고, 각 도구의 가격(개인 플랜), VS Code 통합 기능, 웹 개발 지원 능력을 비교해주세요."
@@ -225,7 +276,12 @@ lead_researcher_prompt = """
 **2. 특정 도구 비교 요청 시 (Follow-up 포함):**
    - 명시된 도구들의 **2025년 최신 정보** 검색
    - 각 도구의 공식 사이트에서 최신 가격, 기능 확인
-   - **Follow-up이면**: 사용자의 새로운 조건(예산, 팀 규모)에 맞는 정보만 1-2번 검색
+   - **Follow-up + information(선호도)**: 
+     * "[도구1] vs [도구2] vs [도구3] popularity 2025"
+     * "[도구1] user reviews December 2025"
+     * "[도구1] GitHub stars 2025"
+     * 1-3번 검색으로 빠르게 인기도 비교
+   - **Follow-up + decision**: 사용자의 새로운 조건(예산, 팀 규모)에 맞는 정보만 1-2번 검색
 
 **3. 각 도구 상세 조사 (병렬 진행):**
    - 공식 사이트 검색: "site:[도메인] pricing 2025"
@@ -661,14 +717,35 @@ final_report_generation_prompt = """
 
 ---
 
-**4. question_type = "information" (정보)** → 간단 정보
+**4. question_type = "information" (정보)** → 간단하고 명확한 정보
 
 **Follow-up인 경우, 사용자 질문에 맞춰 인사말 자연스럽게 작성:**
 - "가격이 얼마야?" → [GREETING]가격 정보를 알려드리겠습니다.[/GREETING]
 - "어떤 기능?" → [GREETING]주요 기능을 정리해드리겠습니다.[/GREETING]
+- "선호도/인기도?" → [GREETING]각 도구의 인기도를 비교해드리겠습니다.[/GREETING]
 
 ## 📌 [정보 주제]
 
+**선호도/인기도 질문인 경우 (예: "사람들이 더 많이 사용하는 건?"):**
+
+### 인기도 순위 (2025년 12월 기준)
+
+**1위: [도구명]**
+- 사용자 수: [구체적 수치 또는 설명]
+- 인기 이유: [1-2줄]
+
+**2위: [도구명]**
+- 사용자 수: [구체적 수치 또는 설명]
+- 인기 이유: [1-2줄]
+
+**3위: [도구명]**
+- 사용자 수: [구체적 수치 또는 설명]
+- 특징: [1-2줄]
+
+**요약:**
+[한 줄로 간단 정리]
+
+**일반 정보 질문인 경우:**
 [간단하고 명확한 정보 제공 - 3-5줄]
 
 ---

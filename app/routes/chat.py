@@ -104,9 +104,22 @@ async def chat(req: ChatRequest):
             final_report = result.get("final_report", "")
             reply_messages = [final_report] if final_report else ["응답을 생성하지 못했습니다."]
         
-        # 3. 캐시 저장 (마지막 메시지만)
-        cache_data = {"reply": reply_messages[-1] if reply_messages else ""}
-        research_cache.set(req.message, cache_data, domain)
+        # 3. 캐시 저장 (주제에 맞는 질문만 저장)
+        last_reply = reply_messages[-1] if reply_messages else ""
+        
+        # 주제에서 벗어난 거부 메시지는 캐시하지 않음
+        is_off_topic_rejection = (
+            "죄송합니다" in last_reply and 
+            "코딩 AI 도구 추천을 전문으로" in last_reply
+        )
+        
+        if not is_off_topic_rejection:
+            cache_data = {"reply": last_reply}
+            research_cache.set(req.message, cache_data, domain)
+            cache_type = "Redis" if research_cache.available else "메모리"
+            print(f"💾 {cache_type} 캐시 저장: {req.message[:50]}...")
+        else:
+            print(f"⚠️ 주제 벗어난 질문 - 캐시 저장 생략")
         
         # 종료 시간 계산
         elapsed_time = time.time() - start_time

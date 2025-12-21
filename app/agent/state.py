@@ -26,14 +26,24 @@ class ResearchComplete(BaseModel):
 
 class ClarifyWithUser(BaseModel):
     """사용자 질문 정제"""
+    is_on_topic: bool = Field(
+        description="사용자 질문이 코딩 AI 도구 추천과 관련 있는가?",
+    )
     need_clarification: bool = Field(
         description="사용자에게 추가 질문이 필요한가?",
+        default=False,
     )
     question: str = Field(
-        description="사용자에게 물어볼 명확화 질문",
+        description="사용자에게 물어볼 명확화 질문 (명확화가 필요한 경우)",
+        default="",
     )
     verification: str = Field(
-        description="연구 시작 확인 메시지",
+        description="연구 시작 확인 메시지 (주제가 맞고 명확화가 불필요한 경우)",
+        default="",
+    )
+    off_topic_message: str = Field(
+        description="주제에서 벗어난 경우 사용자에게 보낼 거부 메시지",
+        default="죄송합니다. 저는 코딩 AI 도구 추천을 전문으로 하는 챗봇입니다. 다시 질문해주세요!",
     )
 
 

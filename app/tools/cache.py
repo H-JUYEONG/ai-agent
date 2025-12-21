@@ -77,13 +77,13 @@ class RedisCache:
                 # 통계 업데이트
                 stats_key = f"ai-agent:stats:cache_count"
                 self.redis.incr(stats_key)
-                print(f"💾 Redis 캐시 저장: {query[:50]}...")
+                # 로그는 chat.py에서 출력하므로 여기서는 생략
             except (RedisError, TypeError) as e:
                 print(f"⚠️ Redis 저장 오류: {e}")
         else:
             # Fallback: 메모리 캐시
             self.memory_cache[key] = result
-            print(f"💾 메모리 캐시 저장: {query[:50]}... (총 {len(self.memory_cache)}개)")
+            # 로그는 chat.py에서 출력하므로 여기서는 생략
     
     def get_stats(self) -> Dict[str, Any]:
         """캐시 통계"""

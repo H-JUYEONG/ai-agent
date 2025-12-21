@@ -52,14 +52,9 @@ configurable_model = init_chat_model(
 async def clarify_with_user(
     state: AgentState, config: RunnableConfig
 ) -> Command[Literal["write_research_brief", "__end__"]]:
-    """사용자 질문 명확화 (선택적)"""
+    """사용자 질문 명확화 및 주제 검증 (주제 검증은 항상 실행)"""
     
     configurable = Configuration.from_runnable_config(config)
-    
-    # 명확화 비활성화 시 바로 다음 단계로
-    if not configurable.allow_clarification:
-        return Command(goto="write_research_brief")
-    
     messages = state["messages"]
     domain = state.get("domain", "AI 서비스")
     
@@ -91,6 +86,23 @@ async def clarify_with_user(
     
     response = await clarification_model.ainvoke([HumanMessage(content=prompt_content)])
     
+    # 🚨 주제 관련성 체크 (항상 실행!)
+    if not response.is_on_topic:
+        print(f"⚠️ [DEBUG] 주제에서 벗어난 질문 감지")
+        return Command(
+            goto="__end__",
+            update={"messages": [AIMessage(content=response.off_topic_message)]}
+        )
+    
+    # 명확화 비활성화 시 바로 다음 단계로 (주제 검증 후)
+    if not configurable.allow_clarification:
+        print(f"✅ [DEBUG] 주제 검증 통과 - 바로 연구 시작")
+        return Command(
+            goto="write_research_brief",
+            update={"messages": [AIMessage(content=response.verification)]}
+        )
+    
+    # 명확화 필요 여부 체크
     if response.need_clarification:
         return Command(
             goto="__end__",
@@ -154,11 +166,11 @@ async def write_research_brief(
     last_user_msg = messages_list[-1].content.lower() if messages_list else ""
     question_type = "comparison"  # 기본값
     
-    if any(kw in last_user_msg for kw in ["하나만", "최종", "결정", "선택"]):
+    if any(kw in last_user_msg for kw in ["하나만", "최종", "결정", "선택", "골라"]):
         question_type = "decision"
-    elif any(kw in last_user_msg for kw in ["왜", "이유", "차이", "포기", "설명"]):
+    elif any(kw in last_user_msg for kw in ["왜", "이유", "차이", "포기", "설명", "뭐가 달라"]):
         question_type = "explanation"
-    elif any(kw in last_user_msg for kw in ["가격", "얼마", "비용", "어떤 기능"]):
+    elif any(kw in last_user_msg for kw in ["가격", "얼마", "비용", "어떤 기능", "선호도", "인기도", "많이 사용", "더 많이", "사람들이", "평가"]):
         question_type = "information"
     
     print(f"🔍 [DEBUG] write_research_brief - Messages: {len(messages_list)}개, Follow-up: {is_followup}, 질문유형: {question_type}, 이전 도구: {previous_tools}")
@@ -593,11 +605,11 @@ async def final_report_generation(state: AgentState, config: RunnableConfig):
     last_user_msg = messages_list[-1].content.lower() if messages_list else ""
     question_type = "comparison"  # 기본값
     
-    if any(kw in last_user_msg for kw in ["하나만", "최종", "결정", "선택"]):
+    if any(kw in last_user_msg for kw in ["하나만", "최종", "결정", "선택", "골라"]):
         question_type = "decision"
-    elif any(kw in last_user_msg for kw in ["왜", "이유", "차이", "포기", "설명"]):
+    elif any(kw in last_user_msg for kw in ["왜", "이유", "차이", "포기", "설명", "뭐가 달라"]):
         question_type = "explanation"
-    elif any(kw in last_user_msg for kw in ["가격", "얼마", "비용", "어떤 기능"]):
+    elif any(kw in last_user_msg for kw in ["가격", "얼마", "비용", "어떤 기능", "선호도", "인기도", "많이 사용", "더 많이", "사람들이", "평가"]):
         question_type = "information"
     
     print(f"🔍 [DEBUG] final_report - Messages: {len(messages_list)}개, Follow-up: {is_followup}, 질문유형: {question_type}, 이전 도구: {previous_tools}")
