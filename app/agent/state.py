@@ -79,6 +79,7 @@ class AgentState(MessagesState):
     notes: Annotated[List[str], override_reducer] = []
     final_report: str
     domain: Optional[str]  # LLM, 코딩, 디자인
+    normalized_query: Optional[dict] = None  # 정규화된 쿼리 정보
 
 
 class SupervisorState(TypedDict):

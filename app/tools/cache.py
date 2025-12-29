@@ -9,10 +9,16 @@ from redis.exceptions import RedisError
 
 
 class RedisCache:
-    """Redis 기반 캐싱 (24시간 TTL)"""
+    """Redis 기반 캐싱 (검색 결과 + 최종 답변)"""
     
-    def __init__(self, ttl_hours: int = 24):
-        self.ttl_seconds = ttl_hours * 3600
+    def __init__(self, search_ttl_hours: int = 24, answer_ttl_hours: int = 168):
+        """
+        Args:
+            search_ttl_hours: 검색 결과 TTL (기본 24시간)
+            answer_ttl_hours: 최종 답변 TTL (기본 7일)
+        """
+        self.search_ttl_seconds = search_ttl_hours * 3600
+        self.answer_ttl_seconds = answer_ttl_hours * 3600
         
         # Redis 연결 (localhost:6379 기본)
         redis_host = os.getenv("REDIS_HOST", "localhost")
@@ -40,6 +46,11 @@ class RedisCache:
     
     def _get_key(self, query: str, domain: str, prefix: str = "answer") -> str:
         """캐시 키 생성"""
+        # 이미 해시 형태(32자 hex)인 경우 그대로 사용
+        if len(query) == 32 and all(c in '0123456789abcdef' for c in query.lower()):
+            # 이미 해시인 경우
+            return f"ai-agent:{prefix}:{domain}:{query}"
+        # 일반 텍스트인 경우 해시 생성
         query_hash = hashlib.md5(f"{query.lower().strip()}".encode()).hexdigest()
         return f"ai-agent:{prefix}:{domain}:{query_hash}"
     
@@ -63,15 +74,31 @@ class RedisCache:
         
         return None
     
-    def set(self, query: str, result: Dict[str, Any], domain: str = "general", prefix: str = "answer"):
-        """캐시에 저장"""
+    def set(self, query: str, result: Dict[str, Any], domain: str = "general", prefix: str = "answer", ttl_seconds: Optional[int] = None):
+        """
+        캐시에 저장
+        
+        Args:
+            query: 쿼리 (또는 캐시 키)
+            result: 저장할 데이터
+            domain: 도메인
+            prefix: 접두사 (answer / query / search)
+            ttl_seconds: 사용자 정의 TTL (None이면 자동 선택)
+        """
         key = self._get_key(query, domain, prefix)
+        
+        # TTL 자동 선택
+        if ttl_seconds is None:
+            if prefix in ["answer", "final"]:
+                ttl_seconds = self.answer_ttl_seconds
+            else:
+                ttl_seconds = self.search_ttl_seconds
         
         if self.available and self.redis:
             try:
                 self.redis.setex(
                     key,
-                    self.ttl_seconds,
+                    ttl_seconds,
                     json.dumps(result, ensure_ascii=False)
                 )
                 # 통계 업데이트
@@ -123,7 +150,7 @@ class RedisCache:
 
 
 # 전역 캐시 인스턴스
-research_cache = RedisCache(ttl_hours=24)
+research_cache = RedisCache(search_ttl_hours=24, answer_ttl_hours=168)  # 검색 24h, 답변 7일
 
 
 

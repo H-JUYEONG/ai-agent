@@ -19,6 +19,8 @@ aiohttp==3.9.1
 python-dotenv==1.0.0
 aiofiles==24.1.0
 
-# Caching
+# Caching & Vector Store
 redis==5.0.1
 hiredis==2.3.2
+qdrant-client==1.7.0
+sentence-transformers>=2.7.0

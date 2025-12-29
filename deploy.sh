@@ -22,6 +22,17 @@ else
     echo "✅ Redis 이미 실행 중"
 fi
 
+# 2-1. Qdrant 컨테이너 확인 및 시작 (없을 경우에만 생성)
+echo "🔍 Qdrant 컨테이너 확인..."
+if ! docker compose ps qdrant | grep -q "Up"; then
+    echo "📦 Qdrant 컨테이너 시작..."
+    docker compose up -d qdrant
+    echo "⏳ Qdrant 초기화 대기..."
+    sleep 5
+else
+    echo "✅ Qdrant 이미 실행 중"
+fi
+
 # 3. Redis 캐시 초기화 (키만 삭제)
 echo "🗑️ Redis 캐시 초기화..."
 docker compose exec -T redis redis-cli FLUSHALL

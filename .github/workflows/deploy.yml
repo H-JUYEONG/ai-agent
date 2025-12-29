@@ -38,6 +38,8 @@ jobs:
           LANGSMITH_PROJECT=ai-service-advisor
           REDIS_HOST=redis
           REDIS_PORT=6379
+          QDRANT_URL=qdrant
+          QDRANT_PORT=6333
           ENVEOF
           EOF
       

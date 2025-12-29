@@ -1,6 +1,7 @@
 """LangGraph nodes for AI Service Advisor"""
 
 import asyncio
+from datetime import datetime
 from typing import Literal
 from langchain.chat_models import init_chat_model
 from langchain_core.messages import (
@@ -42,6 +43,9 @@ from app.agent.utils import (
     get_notes_from_tool_calls,
 )
 from app.tools.search import searcher
+from app.tools.vector_store import vector_store
+from app.tools.query_normalizer import query_normalizer
+from app.tools.cache import research_cache
 
 # 설정 가능한 모델
 configurable_model = init_chat_model(
@@ -52,7 +56,7 @@ configurable_model = init_chat_model(
 async def clarify_with_user(
     state: AgentState, config: RunnableConfig
 ) -> Command[Literal["write_research_brief", "__end__"]]:
-    """사용자 질문 명확화 및 주제 검증 (주제 검증은 항상 실행)"""
+    """사용자 질문 명확화 및 주제 검증 + 쿼리 정규화 + 캐시 조회"""
     
     configurable = Configuration.from_runnable_config(config)
     messages = state["messages"]
@@ -63,6 +67,32 @@ async def clarify_with_user(
     
     # 디버깅
     print(f"🔍 [DEBUG] clarify - Messages: {len(messages)}개, Follow-up: {is_followup}")
+    
+    # ========== 🆕 1단계: 쿼리 정규화 (캐시 키 생성) ==========
+    last_user_message = messages[-1].content if messages else ""
+    
+    model_config = {
+        "model": configurable.research_model,
+        "max_tokens": 200,  # 정규화는 짧게
+        "api_key": get_api_key_for_model(configurable.research_model, config),
+    }
+    
+    normalized = await query_normalizer.normalize(last_user_message, config=model_config)
+    cache_key = normalized["cache_key"]
+    
+    # ========== 🆕 2단계: Redis 최종 답변 캐시 조회 ==========
+    print(f"🔍 [캐시 조회] 원본 질문: '{last_user_message[:50]}...'")
+    print(f"🔍 [캐시 조회] 정규화: '{normalized['normalized_text']}' → 캐시키: {cache_key[:16]}...")
+    
+    cached_answer = research_cache.get(cache_key, domain=domain, prefix="final")
+    if cached_answer:
+        print(f"✅ [캐시 HIT] 최종 답변 반환 (캐시키: {cache_key[:16]}...)")
+        return Command(
+            goto="__end__",
+            update={"messages": [AIMessage(content=cached_answer["content"])]}
+        )
+    
+    print(f"⚠️ [캐시 MISS] 정규화된 쿼리: '{normalized['normalized_text']}' (키워드: {normalized['keywords']})")
     
     model_config = {
         "model": configurable.research_model,
@@ -99,7 +129,10 @@ async def clarify_with_user(
         print(f"✅ [DEBUG] 주제 검증 통과 - 바로 연구 시작")
         return Command(
             goto="write_research_brief",
-            update={"messages": [AIMessage(content=response.verification)]}
+            update={
+                "messages": [AIMessage(content=response.verification)],
+                "normalized_query": normalized  # 🆕 정규화 정보 저장
+            }
         )
     
     # 명확화 필요 여부 체크
@@ -111,7 +144,10 @@ async def clarify_with_user(
     else:
         return Command(
             goto="write_research_brief",
-            update={"messages": [AIMessage(content=response.verification)]}
+            update={
+                "messages": [AIMessage(content=response.verification)],
+                "normalized_query": normalized  # 🆕 정규화 정보 저장
+            }
         )
 
 
@@ -371,7 +407,7 @@ async def supervisor_tools(
 async def researcher(
     state: ResearcherState, config: RunnableConfig
 ) -> Command[Literal["researcher_tools"]]:
-    """개별 연구원 (웹 검색 수행)"""
+    """개별 연구원 (Vector DB 조회 → 웹 검색)"""
     
     configurable = Configuration.from_runnable_config(config)
     domain = state.get("domain", "AI 서비스")
@@ -383,9 +419,27 @@ async def researcher(
         "api_key": get_api_key_for_model(configurable.research_model, config),
     }
     
+    # ========== 🆕 Vector DB 검색 도구 추가 ==========
+    async def vector_search(query: str) -> str:
+        """Vector DB에서 Facts 검색 (웹 검색 전 우선 시도)"""
+        facts = vector_store.search_facts(query, limit=5, score_threshold=0.75)
+        
+        if not facts:
+            return "Vector DB에 관련 정보가 없습니다. 웹 검색이 필요합니다."
+        
+        # 결과 포맷팅
+        formatted = f"✅ Vector DB에서 {len(facts)}개 관련 정보 발견:\n\n"
+        for idx, fact in enumerate(facts, 1):
+            age_days = (datetime.now().timestamp() - fact['created_at']) / 86400
+            formatted += f"{idx}. [신뢰도 {fact['score']:.2f}, {age_days:.0f}일 전]\n"
+            formatted += f"   {fact['text'][:300]}...\n"
+            formatted += f"   출처: {fact['source']} ({fact['url'][:50]}...)\n\n"
+        
+        return formatted
+    
     # 검색 도구 정의
     async def web_search(query: str) -> str:
-        """웹 검색 도구"""
+        """웹 검색 도구 (Vector DB에 정보가 없을 때 사용)"""
         result = await searcher.search(
             query=query,
             max_results=configurable.search_max_results,
@@ -394,6 +448,22 @@ async def researcher(
         
         if not result["success"]:
             return f"검색 실패: {result.get('error', '알 수 없는 오류')}"
+        
+        # ========== 🆕 검색 결과를 Vector DB에 저장 ==========
+        facts_to_store = []
+        for r in result["results"]:
+            facts_to_store.append({
+                "text": f"{r['title']}: {r['content']}",
+                "source": result['source'],
+                "url": r['url'],
+                "metadata": {
+                    "score": r.get('score', 0),
+                    "query": query
+                }
+            })
+        
+        if facts_to_store:
+            vector_store.add_facts(facts_to_store, ttl_days=30)
         
         # 결과 포맷팅
         formatted = f"검색 결과 ({result['source']}):\n\n"
@@ -404,7 +474,7 @@ async def researcher(
         
         return formatted
     
-    tools = [web_search, think_tool]
+    tools = [vector_search, web_search, think_tool]
     
     research_model = (
         configurable_model
@@ -461,8 +531,30 @@ async def researcher_tools(
     tool_outputs = []
     
     for tc in most_recent_message.tool_calls:
-        if tc["name"] == "web_search":
-            # 교차 검증 활성화 (Tavily + DuckDuckGo 동시 검색)
+        # ========== 🆕 Vector DB 검색 처리 ==========
+        if tc["name"] == "vector_search":
+            facts = vector_store.search_facts(tc["args"]["query"], limit=5, score_threshold=0.75)
+            
+            if facts:
+                formatted = f"✅ Vector DB에서 {len(facts)}개 관련 정보 발견:\n\n"
+                for idx, fact in enumerate(facts, 1):
+                    from datetime import datetime
+                    age_days = (datetime.now().timestamp() - fact['created_at']) / 86400
+                    formatted += f"{idx}. [신뢰도 {fact['score']:.2f}, {age_days:.0f}일 전]\n"
+                    formatted += f"   {fact['text'][:300]}...\n"
+                    formatted += f"   출처: {fact['source']} ({fact.get('url', '')[:50]}...)\n\n"
+                content = formatted
+            else:
+                content = "Vector DB에 관련 정보가 없습니다. 웹 검색을 사용해주세요."
+            
+            tool_outputs.append(ToolMessage(
+                content=content,
+                name="vector_search",
+                tool_call_id=tc["id"]
+            ))
+        
+        elif tc["name"] == "web_search":
+            # 교차 검증 활성화 (Tavily + Serper Fallback)
             result = await searcher.search(
                 query=tc["args"]["query"],
                 max_results=configurable.search_max_results,
@@ -470,6 +562,23 @@ async def researcher_tools(
             )
             
             if result["success"]:
+                # ========== 🆕 웹 검색 결과를 Vector DB에 저장 ==========
+                facts_to_store = []
+                for r in result["results"]:
+                    facts_to_store.append({
+                        "text": f"{r['title']}: {r['content']}",
+                        "source": result['source'],
+                        "url": r['url'],
+                        "metadata": {
+                            "score": r.get('score', 0),
+                            "query": tc["args"]["query"],
+                            "is_official": r.get('is_official', False)
+                        }
+                    })
+                
+                if facts_to_store:
+                    vector_store.add_facts(facts_to_store, ttl_days=30)
+                
                 source_info = result.get("source", "unknown")
                 if source_info == "verified":
                     verified_info = f"교차 검증됨 (Tavily: {result.get('tavily_count', 0)}개, DuckDuckGo: {result.get('ddg_count', 0)}개 → {result.get('verified_count', 0)}개 검증)"
@@ -574,11 +683,12 @@ async def compress_research(state: ResearcherState, config: RunnableConfig):
 
 
 async def final_report_generation(state: AgentState, config: RunnableConfig):
-    """최종 리포트 생성"""
+    """최종 리포트 생성 + Redis 캐싱"""
     
     configurable = Configuration.from_runnable_config(config)
     notes = state.get("notes", [])
     findings = "\n\n".join(notes)
+    domain = state.get("domain", "AI 서비스")
     
     writer_model_config = {
         "model": configurable.final_report_model,
@@ -630,6 +740,23 @@ async def final_report_generation(state: AgentState, config: RunnableConfig):
         ])
         
         report_content = str(final_report.content)
+        
+        # ========== 🆕 최종 답변을 Redis에 캐싱 ==========
+        normalized_query = state.get("normalized_query", {})
+        print(f"🔍 [DEBUG] final_report - normalized_query: {normalized_query}")
+        
+        if normalized_query and normalized_query.get("cache_key"):
+            cache_key = normalized_query["cache_key"]
+            print(f"💾 [캐시 저장] 정규화: '{normalized_query.get('normalized_text', '')}' → 캐시키: {cache_key[:16]}...")
+            research_cache.set(
+                cache_key,
+                {"content": report_content},
+                domain=domain,
+                prefix="final"
+            )
+            print(f"✅ [캐시 저장] 최종 답변 저장 완료 (캐시키: {cache_key[:16]}..., TTL: 7일)")
+        else:
+            print(f"⚠️ [캐시 저장 실패] normalized_query 없음: {normalized_query}")
         
         # 마크다운 코드 블록 제거 (```로 시작하고 끝나는 경우)
         report_content = report_content.strip()
