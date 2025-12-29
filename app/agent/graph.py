@@ -26,7 +26,7 @@ from app.agent.nodes import (
 researcher_builder = StateGraph(
     ResearcherState,
     output=ResearcherOutputState,
-    config_schema=Configuration
+    context_schema=Configuration
 )
 
 researcher_builder.add_node("researcher", researcher)
@@ -40,7 +40,7 @@ researcher_subgraph = researcher_builder.compile()
 
 
 # Supervisor Subgraph (연구 관리 워크플로우)
-supervisor_builder = StateGraph(SupervisorState, config_schema=Configuration)
+supervisor_builder = StateGraph(SupervisorState, context_schema=Configuration)
 
 supervisor_builder.add_node("supervisor", supervisor)
 supervisor_builder.add_node("supervisor_tools", supervisor_tools)
@@ -54,7 +54,7 @@ supervisor_subgraph = supervisor_builder.compile()
 deep_researcher_builder = StateGraph(
     AgentState,
     input=AgentInputState,
-    config_schema=Configuration
+    context_schema=Configuration
 )
 
 deep_researcher_builder.add_node("clarify_with_user", clarify_with_user)

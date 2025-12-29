@@ -4,12 +4,12 @@ jinja2==3.1.2
 python-multipart==0.0.6
 pydantic>=2.7.4
 
-# LangChain & LangGraph
-langchain==0.3.12
-langchain-openai==0.2.14
-langchain-core==0.3.28
-langgraph==0.2.60
-langsmith==0.2.6
+# LangChain & LangGraph (1.x 라인 고정)
+langchain==1.*
+langgraph==1.*
+langchain-openai==1.*
+langchain-text-splitters==1.*
+langsmith>=0.2.0
 
 # Search Tools
 tavily-python==0.5.0
@@ -22,4 +22,3 @@ aiofiles==24.1.0
 # Caching
 redis==5.0.1
 hiredis==2.3.2
-
