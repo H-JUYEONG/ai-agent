@@ -354,3 +354,5 @@ vector_store.search_facts(query, score_threshold=0.75)  # 균형
 3. 캐시 워밍 (인기 질문 미리 저장)
 4. A/B 테스트 (캐시 전략 비교)
 
+
+

@@ -47,10 +47,66 @@ class ClarifyWithUser(BaseModel):
     )
 
 
+class HardConstraints(BaseModel):
+    """하드 제약 조건 (필터링 규칙)"""
+    budget_max: Optional[int] = Field(
+        default=None,
+        description="최대 예산 (원화 기준)"
+    )
+    security_required: bool = Field(
+        default=False,
+        description="보안/프라이버시 필수 여부"
+    )
+    excluded_tools: List[str] = Field(
+        default_factory=list,
+        description="명시적으로 제외할 도구 목록"
+    )
+    excluded_features: List[str] = Field(
+        default_factory=list,
+        description="금지된 기능 목록 (예: 외부 서버 전송, 클라우드 저장)"
+    )
+    team_size: Optional[int] = Field(
+        default=None,
+        description="팀 규모"
+    )
+    must_support_ide: List[str] = Field(
+        default_factory=list,
+        description="반드시 지원해야 할 IDE"
+    )
+    must_support_language: List[str] = Field(
+        default_factory=list,
+        description="반드시 지원해야 할 언어"
+    )
+    other_requirements: List[str] = Field(
+        default_factory=list,
+        description="기타 요구사항"
+    )
+
+
 class ResearchQuestion(BaseModel):
     """연구 질문 생성"""
     research_brief: str = Field(
         description="연구를 안내할 구체적인 연구 질문",
+    )
+    question_type: str = Field(
+        description="""사용자 질문의 의도와 유형을 분석하여 분류:
+- "decision": 의사결정 요청 (1순위, 2순위, 최종 선택 등)
+- "comparison": 비교/평가 요청 (특히 강한, 더 좋은, 어떤 도구 등)
+- "explanation": 설명 요청 (왜, 이유, 차이 등)
+- "information": 정보 요청 (가격, 기능, 선호도 등)
+- "guide": 실무 가이드 요청 (설정 방법, 도입 가이드, 사용법, 세팅 방법, 주의사항 등)
+
+**중요**: "설정", "세팅", "방법", "가이드", "도입", "사용법", "어떻게", "주의사항" 같은 표현이 있으면 "guide"로 분류하세요.
+
+사용자 질문의 핵심 의도를 정확히 파악하여 분류하세요.""",
+        default="comparison"
+    )
+    hard_constraints: HardConstraints = Field(
+        default_factory=HardConstraints,
+        description="""사용자가 명시한 하드 제약 조건 (필터링 규칙).
+        
+**중요**: "금지", "불가", "차단", "제외", "안 됨", "절대 안 됨", "사용할 수 없음" 같은 표현이 있으면 
+해당 항목을 excluded_tools 또는 excluded_features에 반드시 추가하세요."""
     )
 
 
@@ -80,6 +136,8 @@ class AgentState(MessagesState):
     final_report: str
     domain: Optional[str]  # LLM, 코딩, 디자인
     normalized_query: Optional[dict] = None  # 정규화된 쿼리 정보
+    constraints: Optional[dict] = None  # 하드 제약 조건 (필터링 규칙)
+    question_type: Optional[str] = None  # LLM이 판단한 질문 유형
 
 
 class SupervisorState(TypedDict):
@@ -90,6 +148,7 @@ class SupervisorState(TypedDict):
     research_iterations: int = 0
     raw_notes: Annotated[List[str], override_reducer] = []
     domain: Optional[str]
+    constraints: Optional[dict]  # 하드 제약 조건
 
 
 class ResearcherState(TypedDict):

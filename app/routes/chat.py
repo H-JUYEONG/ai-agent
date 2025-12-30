@@ -87,16 +87,33 @@ async def chat(req: ChatRequest):
         # 최종 리포트 추출
         messages = result.get("messages", [])
         
-        # AI 메시지만 추출 (마지막 N개)
-        ai_messages = [msg for msg in messages if isinstance(msg, AIMessage)]
+        # AI 메시지만 추출 (중복 제거)
+        ai_messages = []
+        seen_contents = set()
+        for msg in messages:
+            if isinstance(msg, AIMessage):
+                content = msg.content if hasattr(msg, 'content') else str(msg)
+                # 중복 제거: 동일한 내용이 이미 있으면 스킵
+                if content not in seen_contents:
+                    ai_messages.append(msg)
+                    seen_contents.add(content)
         
-        # 마지막 2개의 AI 메시지 확인 (인사말 + 리포트 분리)
+        # 마지막 메시지 확인 (인사말 + 리포트 분리)
+        reply_messages = []
         if len(ai_messages) >= 2:
-            # 마지막 2개 메시지 반환 (리스트로)
-            reply_messages = [ai_messages[-2].content, ai_messages[-1].content]
-            print(f"✅ [DEBUG] 2개 메시지 감지: {len(reply_messages)}개")
+            # 마지막 2개 메시지 확인
+            last_msg = ai_messages[-1].content
+            second_last_msg = ai_messages[-2].content
+            
+            # 첫 번째가 짧고(인사말), 두 번째가 길면(리포트) 분리
+            if len(second_last_msg) < 200 and len(last_msg) > 500:
+                reply_messages = [second_last_msg, last_msg]
+                print(f"✅ [DEBUG] 인사말 + 리포트 분리: 2개")
+            else:
+                # 중복이거나 같은 내용이면 마지막 1개만
+                reply_messages = [last_msg]
+                print(f"✅ [DEBUG] 중복 제거 후 1개 메시지")
         elif len(ai_messages) == 1:
-            # 1개만 있으면 그대로 반환
             reply_messages = [ai_messages[-1].content]
             print(f"✅ [DEBUG] 1개 메시지 감지")
         else:

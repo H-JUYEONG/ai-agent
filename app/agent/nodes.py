@@ -1,6 +1,7 @@
 """LangGraph nodes for AI Service Advisor"""
 
 import asyncio
+import re
 from datetime import datetime
 from typing import Literal
 from langchain.chat_models import init_chat_model
@@ -62,11 +63,13 @@ async def clarify_with_user(
     messages = state["messages"]
     domain = state.get("domain", "AI 서비스")
     
-    # 간단한 판단: Messages 개수만으로
-    is_followup = len(messages) >= 3  # 질문1 + 답변1 + 질문2
+    # 질문 순서 파악: HumanMessage 개수로 판단 (더 정확하게)
+    human_messages = [msg for msg in messages if isinstance(msg, HumanMessage)]
+    question_number = len(human_messages)  # 1번째, 2번째, 3번째 질문...
+    is_followup = question_number > 1  # 2번째 질문부터 Follow-up
     
     # 디버깅
-    print(f"🔍 [DEBUG] clarify - Messages: {len(messages)}개, Follow-up: {is_followup}")
+    print(f"🔍 [DEBUG] clarify - Messages: {len(messages)}개, HumanMessage: {len(human_messages)}개, 질문 순서: {question_number}번째, Follow-up: {is_followup}")
     
     # ========== 🆕 1단계: 쿼리 정규화 (캐시 키 생성) ==========
     last_user_message = messages[-1].content if messages else ""
@@ -87,10 +90,140 @@ async def clarify_with_user(
     cached_answer = research_cache.get(cache_key, domain=domain, prefix="final")
     if cached_answer:
         print(f"✅ [캐시 HIT] 최종 답변 반환 (캐시키: {cache_key[:16]}...)")
-        return Command(
-            goto="__end__",
-            update={"messages": [AIMessage(content=cached_answer["content"])]}
-        )
+        
+        # Follow-up인 경우 이전 추천 도구 확인
+        # 단, 같은 의미의 질문(같은 캐시 키)이면 이전 추천 도구 확인 건너뛰고 캐시 사용
+        if is_followup:
+            # 이전 메시지에서 추천된 도구 추출 (모든 AI 메시지에서)
+            previous_tools_in_messages = []
+            all_tools = []
+            for msg in reversed(messages[:-1]):  # 마지막 사용자 메시지 제외
+                if isinstance(msg, AIMessage) and hasattr(msg, 'content'):
+                    content = str(msg.content)
+                    # 다양한 패턴으로 도구명 추출
+                    # 패턴 1: 📊 [도구명]
+                    tools_found = re.findall(r'📊\s+([^\n]+)', content)
+                    if tools_found:
+                        all_tools.extend([t.strip() for t in tools_found])
+                    # 패턴 2: ## 📊 [도구명]
+                    tools_found2 = re.findall(r'##\s+📊\s+([^\n]+)', content)
+                    if tools_found2:
+                        all_tools.extend([t.strip() for t in tools_found2])
+                    # 패턴 3: **1순위: [도구명]**, **2순위: [도구명]**
+                    tools_found3 = re.findall(r'\*\*[0-9]+순위:\s*([^\*]+)\*\*', content)
+                    if tools_found3:
+                        all_tools.extend([t.strip() for t in tools_found3])
+                    # 패턴 4: **최종 추천: [도구명]**
+                    tools_found4 = re.findall(r'\*\*최종 추천:\s*([^\*]+)\*\*', content)
+                    if tools_found4:
+                        all_tools.extend([t.strip() for t in tools_found4])
+            
+            # 중복 제거
+            seen = set()
+            for tool in all_tools:
+                # 도구명 정제 (불필요한 문자 제거)
+                tool_clean = re.sub(r'[\(\)\[\]월\s\$0-9]+', '', tool).strip()
+                if tool_clean and tool_clean not in seen and len(tool_clean) > 2:
+                    seen.add(tool_clean)
+                    previous_tools_in_messages.append(tool_clean)
+            
+            # 이전 추천 도구가 있으면 캐시 검증, 없으면 같은 의미의 질문이므로 캐시 그대로 사용
+            if previous_tools_in_messages:
+                # 캐시된 답변에서 도구 추출 (다양한 패턴)
+                cached_tools = []
+                cached_content = cached_answer["content"]
+                # 패턴 1: 📊 [도구명]
+                tools_found = re.findall(r'📊\s+([^\n]+)', cached_content)
+                cached_tools.extend([t.strip() for t in tools_found])
+                # 패턴 2: ## 📊 [도구명]
+                tools_found2 = re.findall(r'##\s+📊\s+([^\n]+)', cached_content)
+                cached_tools.extend([t.strip() for t in tools_found2])
+                # 패턴 3: **1순위: [도구명]**
+                tools_found3 = re.findall(r'\*\*[0-9]+순위:\s*([^\*]+)\*\*', cached_content)
+                cached_tools.extend([t.strip() for t in tools_found3])
+                
+                # 이전 추천 도구와 캐시된 답변의 도구가 다르면 캐시 무시
+                if cached_tools:
+                    # 도구명 정제
+                    previous_tools_clean = [re.sub(r'[\(\)\[\]월\s\$0-9]+', '', t).strip() for t in previous_tools_in_messages]
+                    cached_tools_clean = [re.sub(r'[\(\)\[\]월\s\$0-9]+', '', t).strip() for t in cached_tools]
+                    
+                    previous_tools_set = set([t for t in previous_tools_clean if len(t) > 2])
+                    cached_tools_set = set([t for t in cached_tools_clean if len(t) > 2])
+                    
+                    # 이전 추천 도구가 캐시에 없거나, 캐시에 이전에 추천하지 않은 새 도구가 있으면 무시
+                    if not previous_tools_set.issubset(cached_tools_set) or len(cached_tools_set - previous_tools_set) > 0:
+                        print(f"⚠️ [캐시 무시] 이전 추천 도구({previous_tools_in_messages})와 캐시 도구({cached_tools})가 다름. 캐시 무시하고 새로 생성")
+                        cached_answer = None  # 캐시 무시
+            else:
+                # 이전 추천 도구가 없으면 같은 의미의 질문이므로 캐시 그대로 사용
+                print(f"✅ [캐시 사용] 이전 추천 도구 없음 - 같은 의미의 질문으로 판단, 캐시 사용")
+        
+        if cached_answer:
+            # 캐시된 답변 처리
+            cached_content = cached_answer["content"]
+            
+            print(f"🔍 [캐시 처리] 캐시된 답변 길이: {len(cached_content)}자, is_followup: {is_followup}")
+            print(f"🔍 [캐시 처리] 캐시된 답변 시작 100자: {cached_content[:100]}")
+            
+            # 리포트 본문 추출 (캐시에는 리포트 본문만 저장되어 있음)
+            report_body = cached_content.strip()
+            
+            # 🚨 캐시 검증: 리포트 본문이 유효한지 확인
+            # 리포트가 너무 짧거나(200자 미만) 비어있으면 캐시 무시
+            if len(report_body) < 200:
+                print(f"⚠️ [캐시 무시] 리포트 본문이 너무 짧음 ({len(report_body)}자). 캐시 무시하고 새로 생성")
+                # pass - 캐시를 사용하지 않고 아래 연구 프로세스로 진행
+            else:
+                # 캐시에서 가져온 답변은 항상 리포트 본문만 있으므로, 멘트를 항상 생성해야 함
+                # [GREETING] 태그가 있는지 확인
+                greeting_from_cache = ""
+                if "[GREETING]" in cached_content and "[/GREETING]" in cached_content:
+                    match = re.search(r'\[GREETING\](.*?)\[/GREETING\]', cached_content, re.DOTALL)
+                    if match:
+                        greeting_from_cache = match.group(1).strip()
+                        report_body = cached_content.replace(match.group(0), "").strip()
+                        print(f"✅ [캐시] [GREETING] 태그에서 인사말 분리: '{greeting_from_cache[:50]}...'")
+                
+                # 캐시에 인사말이 있으면 그걸 사용
+                if greeting_from_cache:
+                    print(f"✅ [캐시 처리] 캐시에서 인사말 발견: '{greeting_from_cache[:50]}...'")
+                    return Command(
+                        goto="__end__",
+                        update={"messages": [
+                            AIMessage(content=greeting_from_cache),
+                            AIMessage(content=report_body)
+                        ]}
+                    )
+                
+                # 🚨 캐시에 인사말이 없으면 생성
+                print(f"⚠️ [캐시 처리] 캐시에 인사말 없음 - 멘트 생성")
+                
+                # 간단한 키워드 기반 멘트 생성 (빠르고 안정적)
+                greeting = "네! 조사해드리겠습니다."
+                
+                if "가격" in last_user_message or "얼마" in last_user_message or "비용" in last_user_message:
+                    greeting = "네! 가격 정보를 알려드리겠습니다."
+                elif "추천" in last_user_message or "순위" in last_user_message:
+                    greeting = "네! 조건에 맞춰 추천해드리겠습니다."
+                elif "선택" in last_user_message or "골라" in last_user_message:
+                    greeting = "네! 최적의 선택을 도와드리겠습니다."
+                elif "차이" in last_user_message or "비교" in last_user_message:
+                    greeting = "네! 비교 분석해드리겠습니다."
+                elif "왜" in last_user_message or "이유" in last_user_message:
+                    greeting = "네! 이유를 설명해드리겠습니다."
+                elif is_followup:
+                    greeting = "네! 조건에 맞춰 분석해드리겠습니다."
+                
+                print(f"✅ [캐시 처리] 멘트 생성 완료: '{greeting}'")
+                
+                return Command(
+                    goto="__end__",
+                    update={"messages": [
+                        AIMessage(content=greeting),
+                        AIMessage(content=report_body)
+                    ]}
+                )
     
     print(f"⚠️ [캐시 MISS] 정규화된 쿼리: '{normalized['normalized_text']}' (키워드: {normalized['keywords']})")
     
@@ -185,31 +318,47 @@ async def write_research_brief(
     
     # Messages 가져오기 및 Follow-up 판단
     messages_list = state.get("messages", [])
-    is_followup = len(messages_list) >= 3
+    human_messages = [msg for msg in messages_list if isinstance(msg, HumanMessage)]
+    question_number = len(human_messages)
+    is_followup = question_number > 1
     
-    # 이전 도구 추출 (Follow-up인 경우)
+    # 이전 도구 추출 (Follow-up인 경우) - 모든 AI 메시지에서 추출
     previous_tools = ""
     if is_followup:
-        import re
-        for msg in reversed(messages_list[:-1]):
-            if hasattr(msg, 'content'):
-                tools_found = re.findall(r'📊\s+([^\n]+)', str(msg.content))
+        all_tools = []
+        for msg in reversed(messages_list[:-1]):  # 마지막 사용자 메시지 제외
+            if isinstance(msg, AIMessage) and hasattr(msg, 'content'):
+                content = str(msg.content)
+                # 다양한 패턴으로 도구명 추출
+                # 패턴 1: 📊 [도구명]
+                tools_found = re.findall(r'📊\s+([^\n]+)', content)
                 if tools_found:
-                    previous_tools = ", ".join(tools_found[:10])
-                    break
-    
-    # 질문 유형 판단
-    last_user_msg = messages_list[-1].content.lower() if messages_list else ""
-    question_type = "comparison"  # 기본값
-    
-    if any(kw in last_user_msg for kw in ["하나만", "최종", "결정", "선택", "골라"]):
-        question_type = "decision"
-    elif any(kw in last_user_msg for kw in ["왜", "이유", "차이", "포기", "설명", "뭐가 달라"]):
-        question_type = "explanation"
-    elif any(kw in last_user_msg for kw in ["가격", "얼마", "비용", "어떤 기능", "선호도", "인기도", "많이 사용", "더 많이", "사람들이", "평가"]):
-        question_type = "information"
-    
-    print(f"🔍 [DEBUG] write_research_brief - Messages: {len(messages_list)}개, Follow-up: {is_followup}, 질문유형: {question_type}, 이전 도구: {previous_tools}")
+                    all_tools.extend([t.strip() for t in tools_found])
+                # 패턴 2: ## 📊 [도구명]
+                tools_found2 = re.findall(r'##\s+📊\s+([^\n]+)', content)
+                if tools_found2:
+                    all_tools.extend([t.strip() for t in tools_found2])
+                # 패턴 3: **1순위: [도구명]**, **2순위: [도구명]**
+                tools_found3 = re.findall(r'\*\*[0-9]+순위:\s*([^\*]+)\*\*', content)
+                if tools_found3:
+                    all_tools.extend([t.strip() for t in tools_found3])
+                # 패턴 4: **최종 추천: [도구명]**
+                tools_found4 = re.findall(r'\*\*최종 추천:\s*([^\*]+)\*\*', content)
+                if tools_found4:
+                    all_tools.extend([t.strip() for t in tools_found4])
+        
+        # 중복 제거하고 순서 유지
+        seen = set()
+        unique_tools = []
+        for tool in all_tools:
+            # 도구명 정제 (불필요한 문자 제거)
+            tool_clean = re.sub(r'[\(\)\[\]월\s\$0-9]+', '', tool).strip()
+            if tool_clean and tool_clean not in seen and len(tool_clean) > 2:
+                seen.add(tool_clean)
+                unique_tools.append(tool_clean)
+        
+        previous_tools = ", ".join(unique_tools[:10])  # 최대 10개
+        print(f"🔍 [DEBUG] write_research_brief - 이전 추천 도구 추출: {previous_tools}")
     
     prompt_content = transform_messages_into_research_topic_prompt.format(
         messages=get_buffer_string(messages_list),
@@ -220,13 +369,22 @@ async def write_research_brief(
         domain_guide=formatted_domain_guide_for_research,
         is_followup="YES" if is_followup else "NO",
         previous_tools=previous_tools if previous_tools else "없음",
-        question_type=question_type
+        question_type="comparison"  # 임시값, LLM이 판단한 값으로 대체됨
     )
     
     response = await research_model.ainvoke([HumanMessage(content=prompt_content)])
     
-    # 디버깅: Research Brief 확인
+    # 질문 유형은 LLM이 스스로 판단 (response.question_type 사용)
+    question_type = response.question_type if hasattr(response, 'question_type') else "comparison"
+    
+    print(f"🔍 [DEBUG] write_research_brief - Messages: {len(messages_list)}개, 질문 순서: {question_number}번째, Follow-up: {is_followup}, 질문유형: {question_type} (LLM 판단), 이전 도구: {previous_tools}")
+    
+    # 디버깅: Research Brief와 제약 조건 확인
     print(f"🔍 [DEBUG] Research Brief: {response.research_brief[:200]}...")
+    print(f"🔍 [DEBUG] Hard Constraints 추출: {response.hard_constraints}")
+    
+    # 제약 조건을 dict로 변환하여 state에 저장
+    constraints = response.hard_constraints.model_dump() if hasattr(response, 'hard_constraints') and response.hard_constraints else {}
     
     # domain_guide도 포맷팅 필요 (current_year 등 포함)
     try:
@@ -253,6 +411,8 @@ async def write_research_brief(
         goto="research_supervisor",
         update={
             "research_brief": response.research_brief,
+            "question_type": response.question_type,  # LLM이 판단한 질문 유형 저장
+            "constraints": constraints,  # 제약 조건 저장
             "supervisor_messages": {
                 "type": "override",
                 "value": [
@@ -316,10 +476,24 @@ async def supervisor_tools(
     )
     
     if exceeded_iterations or no_tool_calls or research_complete_called:
+        # notes 추출 (모든 ToolMessage에서 추출)
+        notes = get_notes_from_tool_calls(supervisor_messages)
+        
+        # 디버깅: notes 확인
+        print(f"🔍 [DEBUG] supervisor_tools 종료 - notes 개수: {len(notes)}")
+        print(f"🔍 [DEBUG] notes 내용: {notes[:2] if notes else '없음'}")
+        
+        # notes가 비어있으면 raw_notes에서 추출 시도
+        if not notes:
+            raw_notes = state.get("raw_notes", [])
+            if raw_notes:
+                print(f"🔍 [DEBUG] raw_notes에서 notes 추출 시도: {len(raw_notes)}개")
+                notes = raw_notes if isinstance(raw_notes, list) else [raw_notes]
+        
         return Command(
             goto="__end__",
             update={
-                "notes": get_notes_from_tool_calls(supervisor_messages),
+                "notes": notes if notes else ["연구 결과가 없습니다."],
                 "research_brief": state.get("research_brief", "")
             }
         )
@@ -394,11 +568,18 @@ async def supervisor_tools(
             ))
         
         # raw_notes 수집
-        raw_notes = "\n".join([
-            "\n".join(obs.get("raw_notes", [])) for obs in results
-        ])
-        if raw_notes:
-            update_payload["raw_notes"] = [raw_notes]
+        raw_notes_list = []
+        for obs in results:
+            obs_raw_notes = obs.get("raw_notes", [])
+            if obs_raw_notes:
+                if isinstance(obs_raw_notes, list):
+                    raw_notes_list.extend(obs_raw_notes)
+                else:
+                    raw_notes_list.append(str(obs_raw_notes))
+        
+        if raw_notes_list:
+            update_payload["raw_notes"] = raw_notes_list
+            print(f"🔍 [DEBUG] raw_notes 수집: {len(raw_notes_list)}개")
     
     update_payload["supervisor_messages"] = all_tool_messages
     return Command(goto="supervisor", update=update_payload)
@@ -690,6 +871,58 @@ async def final_report_generation(state: AgentState, config: RunnableConfig):
     findings = "\n\n".join(notes)
     domain = state.get("domain", "AI 서비스")
     
+    # Messages 가져오기 및 Follow-up 판단
+    messages_list = state.get("messages", [])
+    human_messages = [msg for msg in messages_list if isinstance(msg, HumanMessage)]
+    question_number = len(human_messages)
+    is_followup = question_number > 1
+    
+    # 디버깅: findings 확인
+    print(f"🔍 [DEBUG] final_report_generation 시작")
+    print(f"🔍 [DEBUG] notes 개수: {len(notes)}")
+    print(f"🔍 [DEBUG] findings 길이: {len(findings)}자")
+    print(f"🔍 [DEBUG] findings 시작 200자: {findings[:200]}")
+    print(f"🔍 [DEBUG] is_followup: {is_followup}")
+    
+    # findings가 비어있을 때 처리
+    if not findings or len(findings.strip()) < 50:
+        print(f"⚠️ [DEBUG] findings가 비어있거나 너무 짧음: {len(findings)}자")
+        
+        # Follow-up 질문인 경우 이전 대화 내용 활용
+        if is_followup:
+            print(f"⚠️ [DEBUG] Follow-up 질문이지만 findings가 비어있음 - 이전 대화 내용 활용")
+            # 이전 AI 메시지에서 도구 정보 추출
+            previous_ai_messages = [msg for msg in messages_list[:-1] if isinstance(msg, AIMessage)]
+            if previous_ai_messages:
+                # 마지막 AI 메시지의 내용을 findings로 사용
+                last_ai_content = str(previous_ai_messages[-1].content) if previous_ai_messages else ""
+                if len(last_ai_content) > 100:
+                    findings = f"이전 추천 내용:\n{last_ai_content}\n\n새로운 질문에 대한 추가 분석이 필요합니다."
+                    print(f"✅ [DEBUG] 이전 대화 내용을 findings로 사용: {len(findings)}자")
+                else:
+                    # 이전 대화 내용도 부족하면 research_brief 사용
+                    research_brief = state.get("research_brief", "")
+                    if research_brief:
+                        findings = f"연구 질문: {research_brief}\n\n이전 추천 도구에 대한 추가 정보가 필요합니다."
+                    else:
+                        findings = "이전에 추천한 도구에 대한 추가 정보를 분석 중입니다."
+            else:
+                # 이전 대화도 없으면 research_brief 사용
+                research_brief = state.get("research_brief", "")
+                findings = f"연구 질문: {research_brief}\n\n추가 정보를 분석 중입니다." if research_brief else "추가 정보를 분석 중입니다."
+        else:
+            # 처음 질문인데 findings가 비어있으면 에러
+            error_greeting = "네! 조사해드리겠습니다."
+            error_message = "죄송합니다. 연구 결과가 부족하여 답변을 생성할 수 없습니다. 다시 질문해주세요."
+            return {
+                "final_report": error_message,
+                "messages": [
+                    AIMessage(content=error_greeting),
+                    AIMessage(content=error_message)
+                ],
+                "notes": {"type": "override", "value": []}
+            }
+    
     writer_model_config = {
         "model": configurable.final_report_model,
         "max_tokens": configurable.final_report_model_max_tokens,
@@ -698,31 +931,82 @@ async def final_report_generation(state: AgentState, config: RunnableConfig):
     
     # Messages 가져오기 및 Follow-up 판단
     messages_list = state.get("messages", [])
-    is_followup = len(messages_list) >= 3
+    human_messages = [msg for msg in messages_list if isinstance(msg, HumanMessage)]
+    question_number = len(human_messages)
+    is_followup = question_number > 1
     
-    # 이전 도구 추출 (Follow-up인 경우)
+    print(f"🔍 [DEBUG] is_followup: {is_followup}, question_number: {question_number}")
+    
+    # 이전 도구 추출 (Follow-up인 경우) - 모든 AI 메시지에서 추출
     previous_tools = ""
     if is_followup:
-        import re
-        for msg in reversed(messages_list[:-1]):
-            if hasattr(msg, 'content'):
-                tools_found = re.findall(r'📊\s+([^\n]+)', str(msg.content))
+        all_tools = []
+        for msg in reversed(messages_list[:-1]):  # 마지막 사용자 메시지 제외
+            if isinstance(msg, AIMessage) and hasattr(msg, 'content'):
+                content = str(msg.content)
+                # 다양한 패턴으로 도구명 추출
+                # 패턴 1: 📊 [도구명]
+                tools_found = re.findall(r'📊\s+([^\n]+)', content)
                 if tools_found:
-                    previous_tools = ", ".join(tools_found[:10])
-                    break
+                    all_tools.extend([t.strip() for t in tools_found])
+                # 패턴 2: ## 📊 [도구명]
+                tools_found2 = re.findall(r'##\s+📊\s+([^\n]+)', content)
+                if tools_found2:
+                    all_tools.extend([t.strip() for t in tools_found2])
+                # 패턴 3: **1순위: [도구명]**, **2순위: [도구명]**
+                tools_found3 = re.findall(r'\*\*[0-9]+순위:\s*([^\*]+)\*\*', content)
+                if tools_found3:
+                    all_tools.extend([t.strip() for t in tools_found3])
+                # 패턴 4: **최종 추천: [도구명]**
+                tools_found4 = re.findall(r'\*\*최종 추천:\s*([^\*]+)\*\*', content)
+                if tools_found4:
+                    all_tools.extend([t.strip() for t in tools_found4])
+        
+        # 중복 제거하고 순서 유지
+        seen = set()
+        unique_tools = []
+        for tool in all_tools:
+            # 도구명 정제 (불필요한 문자 제거)
+            tool_clean = re.sub(r'[\(\)\[\]월\s\$0-9]+', '', tool).strip()
+            if tool_clean and tool_clean not in seen and len(tool_clean) > 2:
+                seen.add(tool_clean)
+                unique_tools.append(tool_clean)
+        
+        previous_tools = ", ".join(unique_tools[:10])  # 최대 10개
+        print(f"🔍 [DEBUG] final_report - 이전 추천 도구 추출: {previous_tools}")
     
-    # 질문 유형 판단
-    last_user_msg = messages_list[-1].content.lower() if messages_list else ""
-    question_type = "comparison"  # 기본값
+    # 질문 유형은 state에서 가져오기 (LLM이 판단한 값)
+    question_type = state.get("question_type", "comparison")
     
-    if any(kw in last_user_msg for kw in ["하나만", "최종", "결정", "선택", "골라"]):
-        question_type = "decision"
-    elif any(kw in last_user_msg for kw in ["왜", "이유", "차이", "포기", "설명", "뭐가 달라"]):
-        question_type = "explanation"
-    elif any(kw in last_user_msg for kw in ["가격", "얼마", "비용", "어떤 기능", "선호도", "인기도", "많이 사용", "더 많이", "사람들이", "평가"]):
-        question_type = "information"
+    print(f"🔍 [DEBUG] final_report - Messages: {len(messages_list)}개, 질문 순서: {question_number}번째, Follow-up: {is_followup}, 질문유형: {question_type} (LLM 판단), 이전 도구: {previous_tools}")
     
-    print(f"🔍 [DEBUG] final_report - Messages: {len(messages_list)}개, Follow-up: {is_followup}, 질문유형: {question_type}, 이전 도구: {previous_tools}")
+    # 제약 조건 가져오기
+    constraints = state.get("constraints", {})
+    print(f"🔍 [DEBUG] final_report - 제약 조건: {constraints}")
+    
+    # 제약 조건을 문자열로 포맷팅
+    constraints_text = ""
+    if constraints:
+        constraints_text = "**🚨 하드 제약 조건 (반드시 준수해야 함):**\n\n"
+        if constraints.get("budget_max"):
+            constraints_text += f"- 최대 예산: {constraints['budget_max']:,}원\n"
+        if constraints.get("security_required"):
+            constraints_text += f"- 보안/프라이버시: 필수 (외부 서버 전송 금지)\n"
+        if constraints.get("excluded_tools"):
+            constraints_text += f"- **제외할 도구 (절대 추천 금지)**: {', '.join(constraints['excluded_tools'])}\n"
+        if constraints.get("excluded_features"):
+            constraints_text += f"- **금지된 기능**: {', '.join(constraints['excluded_features'])}\n"
+        if constraints.get("team_size"):
+            constraints_text += f"- 팀 규모: {constraints['team_size']}명\n"
+        if constraints.get("must_support_ide"):
+            constraints_text += f"- 필수 지원 IDE: {', '.join(constraints['must_support_ide'])}\n"
+        if constraints.get("must_support_language"):
+            constraints_text += f"- 필수 지원 언어: {', '.join(constraints['must_support_language'])}\n"
+        if constraints.get("other_requirements"):
+            constraints_text += f"- 기타 요구사항: {', '.join(constraints['other_requirements'])}\n"
+        constraints_text += "\n**⚠️ 중요**: 위 제약 조건을 위반하는 도구는 추천 목록에서 완전히 제외해야 합니다. 단순히 언급하거나 설명만 하는 것이 아니라, 아예 추천하지 마세요.\n"
+    else:
+        constraints_text = "제약 조건 없음"
     
     final_prompt = final_report_generation_prompt.format(
         research_brief=state.get("research_brief", ""),
@@ -731,15 +1015,37 @@ async def final_report_generation(state: AgentState, config: RunnableConfig):
         date=get_today_str(),
         is_followup="YES" if is_followup else "NO",
         previous_tools=previous_tools if previous_tools else "없음",
-        question_type=question_type
+        question_type=question_type,
+        constraints=constraints_text
     )
     
     try:
+        print(f"🔍 [DEBUG] 리포트 생성 시작 (프롬프트 길이: {len(final_prompt)}자)")
+        print(f"🔍 [DEBUG] 프롬프트 시작 300자: {final_prompt[:300]}")
+        
         final_report = await configurable_model.with_config(writer_model_config).ainvoke([
             HumanMessage(content=final_prompt)
         ])
         
-        report_content = str(final_report.content)
+        print(f"🔍 [DEBUG] 리포트 생성 완료")
+        report_content = str(final_report.content).strip()
+        print(f"🔍 [DEBUG] 리포트 내용 길이: {len(report_content)}자")
+        print(f"🔍 [DEBUG] 리포트 시작 200자: {report_content[:200]}")
+        
+        # 리포트가 비어있거나 너무 짧으면 에러 처리
+        if not report_content or len(report_content) < 50:
+            print(f"⚠️ [DEBUG] 리포트가 비어있거나 너무 짧음: {len(report_content)}자")
+            print(f"⚠️ [DEBUG] 리포트 전체 내용: {repr(report_content)}")
+            error_greeting = "네! 조건에 맞춰 분석해드리겠습니다." if is_followup else "네! 조사해드리겠습니다."
+            error_message = "죄송합니다. 답변을 생성하지 못했습니다. 다시 시도해주세요."
+            return {
+                "final_report": error_message,
+                "messages": [
+                    AIMessage(content=error_greeting),
+                    AIMessage(content=error_message)
+                ],
+                "notes": {"type": "override", "value": []}
+            }
         
         # ========== 🆕 최종 답변을 Redis에 캐싱 ==========
         normalized_query = state.get("normalized_query", {})
@@ -774,7 +1080,6 @@ async def final_report_generation(state: AgentState, config: RunnableConfig):
         print(f"🔍 [DEBUG] 리포트 시작 100자: {report_content[:100]}")
         
         if "[GREETING]" in report_content and "[/GREETING]" in report_content:
-            import re
             # 태그와 내용을 추출 (여러 줄 포함)
             match = re.search(r'\[GREETING\](.*?)\[/GREETING\]', report_content, re.DOTALL)
             if match:
@@ -783,7 +1088,13 @@ async def final_report_generation(state: AgentState, config: RunnableConfig):
                 report_body = report_content.replace(match.group(0), "").strip()
                 
                 print(f"✅ [DEBUG] 인사말 추출 성공: {greeting[:50]}...")
+                print(f"✅ [DEBUG] 리포트 본문 길이: {len(report_body)}자")
                 print(f"✅ [DEBUG] 리포트 본문 시작: {report_body[:100]}")
+                
+                # report_body가 비어있으면 원본 report_content 사용
+                if not report_body or len(report_body) < 50:
+                    print(f"⚠️ [DEBUG] report_body가 비어있음 - 원본 report_content 사용")
+                    report_body = report_content
                 
                 # 두 개의 메시지로 반환
                 messages_to_add = [
@@ -792,12 +1103,37 @@ async def final_report_generation(state: AgentState, config: RunnableConfig):
                 ]
             else:
                 print(f"❌ [DEBUG] 태그 파싱 실패 - 정규식 매칭 실패")
-                # 태그 파싱 실패 시 전체를 하나의 메시지로
-                messages_to_add = [final_report]
+                # 태그 파싱 실패 시에도 멘트 + 리포트로 분리
+                last_msg = messages_list[-1].content.lower() if messages_list else ""
+                greeting = "네! 조건에 맞춰 분석해드리겠습니다." if is_followup else "네! 조사해드리겠습니다."
+                messages_to_add = [
+                    AIMessage(content=greeting),
+                    AIMessage(content=report_content)
+                ]
         else:
-            print(f"✅ [DEBUG] GREETING 태그 없음 - 일반 리포트")
-            # 인사말 없는 경우 하나의 메시지로
-            messages_to_add = [final_report]
+            print(f"✅ [DEBUG] GREETING 태그 없음 - 키워드 기반 멘트 생성")
+            # 키워드 기반으로 간단하고 빠르게 멘트 생성
+            last_msg = messages_list[-1].content.lower() if messages_list else ""
+            greeting = "네! 조사해드리겠습니다."
+            
+            if "가격" in last_msg or "얼마" in last_msg or "비용" in last_msg:
+                greeting = "네! 가격 정보를 알려드리겠습니다."
+            elif "추천" in last_msg or "순위" in last_msg:
+                greeting = "네! 조건에 맞춰 추천해드리겠습니다."
+            elif "선택" in last_msg or "골라" in last_msg:
+                greeting = "네! 최적의 선택을 도와드리겠습니다."
+            elif "차이" in last_msg or "비교" in last_msg:
+                greeting = "네! 비교 분석해드리겠습니다."
+            elif "왜" in last_msg or "이유" in last_msg:
+                greeting = "네! 이유를 설명해드리겠습니다."
+            elif is_followup:
+                greeting = "네! 조건에 맞춰 분석해드리겠습니다."
+            
+            messages_to_add = [
+                AIMessage(content=greeting),
+                AIMessage(content=report_content)
+            ]
+            print(f"✅ [DEBUG] 멘트 생성 완료: '{greeting}'")
         
         return {
             "final_report": report_content,
@@ -807,9 +1143,19 @@ async def final_report_generation(state: AgentState, config: RunnableConfig):
     
     except Exception as e:
         print(f"❌ 리포트 생성 실패: {e}")
+        import traceback
+        traceback.print_exc()
+        
+        # 에러 발생 시에도 멘트 + 에러 메시지 반환
+        error_greeting = "네! 조건에 맞춰 분석해드리겠습니다." if is_followup else "네! 조사해드리겠습니다."
+        error_message = f"죄송합니다. 답변 생성 중 오류가 발생했습니다. 다시 시도해주세요.\n\n오류: {str(e)}"
+        
         return {
-            "final_report": f"리포트 생성 중 오류 발생: {str(e)}",
-            "messages": [AIMessage(content="리포트 생성 실패")],
+            "final_report": error_message,
+            "messages": [
+                AIMessage(content=error_greeting),
+                AIMessage(content=error_message)
+            ],
             "notes": {"type": "override", "value": []}
         }
 

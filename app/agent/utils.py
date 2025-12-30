@@ -30,8 +30,12 @@ def get_notes_from_tool_calls(messages: List) -> List[str]:
     notes = []
     for msg in messages:
         if isinstance(msg, ToolMessage):
+            # ConductResearch 결과 또는 compressed_research 내용 추출
             if msg.name == "ConductResearch":
-                notes.append(str(msg.content))
+                content = str(msg.content)
+                # "연구 실패"가 아닌 실제 내용만 추가
+                if content and content != "연구 실패" and len(content.strip()) > 10:
+                    notes.append(content)
     return notes
 
 
