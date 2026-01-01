@@ -5,10 +5,10 @@ python-multipart==0.0.6
 pydantic>=2.7.4
 
 # LangChain & LangGraph (1.x 라인 고정)
-langchain==1.*
-langgraph==1.*
-langchain-openai==1.*
-langchain-text-splitters==1.*
+langchain>=1.0.0,<2.0.0
+langgraph>=1.0.0,<2.0.0
+langchain-openai>=1.0.0,<2.0.0
+langchain-text-splitters>=1.0.0,<2.0.0
 langsmith>=0.2.0
 
 # Search Tools
@@ -23,4 +23,5 @@ aiofiles==24.1.0
 redis==5.0.1
 hiredis==2.3.2
 qdrant-client==1.7.0
-sentence-transformers>=2.7.0
+# sentence-transformers는 torch CPU 버전 필요 (Dockerfile에서 먼저 설치)
+sentence-transformers>=2.7.0,<3.0.0
