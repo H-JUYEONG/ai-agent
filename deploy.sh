@@ -56,21 +56,31 @@ docker compose up -d app
 
 # 6. 로그 확인
 echo "📋 로그 확인 (최근 로그)..."
-sleep 5
-docker compose logs --tail=50
+sleep 10
+docker compose logs app --tail=100
 
-# 7. 헬스 체크
-echo "🏥 헬스 체크..."
-sleep 5
+# 7. 헬스 체크 (최대 5분 대기)
+echo "🏥 헬스 체크 - App이 준비될 때까지 대기 중..."
+echo "Waiting for app to be ready..."
 
-if curl -f http://localhost:8000/ > /dev/null 2>&1; then
-    echo "✅ 배포 성공! 서비스가 정상 작동 중입니다."
-    echo "🌐 URL: http://$(curl -s ifconfig.me):8000"
-else
-    echo "❌ 배포 실패! 로그를 확인하세요."
-    docker compose logs
-    exit 1
-fi
+for i in {1..30}; do
+    if curl -sf http://localhost:8000/health > /dev/null 2>&1 || curl -sf http://localhost:8000/ > /dev/null 2>&1; then
+        echo "✅ App is ready!"
+        echo "✅ 배포 성공! 서비스가 정상 작동 중입니다."
+        echo "🌐 URL: http://$(curl -s ifconfig.me):8000"
+        exit 0
+    fi
+    echo "⏳ Not ready yet... retry $i/30"
+    sleep 10
+done
+
+echo "❌ Health check failed"
+echo "❌ 배포 실패! 로그를 확인하세요."
+echo "📋 App 컨테이너 로그:"
+docker compose logs app --tail=50
+echo "📋 전체 컨테이너 상태:"
+docker compose ps
+exit 1
 
 echo "📊 실행 중인 컨테이너:"
 docker compose ps

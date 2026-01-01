@@ -24,6 +24,9 @@ RUN pip install --no-cache-dir "torch>=2.0.0,<3.0.0" --index-url https://downloa
 COPY requirements.txt .
 RUN pip install --no-cache-dir --default-timeout=100 -r requirements.txt
 
+# 모델 preload (컨테이너 시작 시 모델 로딩 시간 단축)
+RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')" || echo "Model preload failed, will load at runtime"
+
 # 빌드 중 사용한 임시 파일 정리 (디스크 공간 확보)
 RUN apt-get clean && \
     rm -rf /tmp/* /var/tmp/* && \
