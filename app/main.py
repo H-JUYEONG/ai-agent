@@ -9,16 +9,13 @@ load_dotenv()
 
 app = FastAPI(title="AI Agent Chat")
 
-# =========================
+
 # Health Check (Docker / CI)
-# =========================
 @app.get("/health")
 def health():
     return {"status": "ok"}
 
-# =========================
 # Static 파일 (캐시 비활성화)
-# =========================
 from fastapi.responses import FileResponse
 from starlette.staticfiles import StaticFiles as StarletteStaticFiles
 
@@ -35,7 +32,5 @@ class NoCacheStaticFiles(StarletteStaticFiles):
 
 app.mount("/static", NoCacheStaticFiles(directory="app/static"), name="static")
 
-# =========================
 # Router 등록
-# =========================
 app.include_router(chat_router)
