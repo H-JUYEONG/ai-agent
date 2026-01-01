@@ -18,7 +18,7 @@ RUN apt-get update && apt-get install -y \
 RUN pip install --upgrade pip setuptools wheel
 
 # torch CPU 버전 먼저 설치 (CUDA 버전은 너무 큼, 디스크 공간 절약)
-RUN pip install --no-cache-dir torch>=2.0.0,<3.0.0 --index-url https://download.pytorch.org/whl/cpu
+RUN pip install --no-cache-dir "torch>=2.0.0,<3.0.0" --index-url https://download.pytorch.org/whl/cpu
 
 # Python 패키지 설치 (캐시 활용, 타임아웃 증가)
 COPY requirements.txt .
