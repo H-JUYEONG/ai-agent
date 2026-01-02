@@ -602,20 +602,31 @@ async def researcher(
     
     # ========== 🆕 Vector DB 검색 도구 추가 ==========
     async def vector_search(query: str) -> str:
-        """Vector DB에서 Facts 검색 (웹 검색 전 우선 시도)"""
-        facts = vector_store.search_facts(query, limit=5, score_threshold=0.75)
+        """Vector DB에서 Facts 검색 (웹 검색 전 우선 시도, threshold 완화)"""
+        # threshold를 0.75 → 0.65로 낮춰서 더 많은 결과 가져오기
+        facts = vector_store.search_facts(query, limit=5, score_threshold=0.65)
         
         if not facts:
             return "Vector DB에 관련 정보가 없습니다. 웹 검색이 필요합니다."
         
-        # 결과 포맷팅
-        formatted = f"✅ Vector DB에서 {len(facts)}개 관련 정보 발견:\n\n"
+        # 결과가 3개 이상이면 충분하다고 판단
+        if len(facts) >= 3:
+            formatted = f"✅ Vector DB에서 {len(facts)}개 관련 정보 발견 (충분함):\n\n"
+            for idx, fact in enumerate(facts, 1):
+                age_days = (datetime.now().timestamp() - fact['created_at']) / 86400
+                formatted += f"{idx}. [신뢰도 {fact['score']:.2f}, {age_days:.0f}일 전]\n"
+                formatted += f"   {fact['text'][:300]}...\n"
+                formatted += f"   출처: {fact['source']} ({fact.get('url', '')[:50]}...)\n\n"
+            return formatted
+        
+        # 결과가 부족하면 웹 검색 필요
+        formatted = f"⚠️ Vector DB에서 {len(facts)}개 관련 정보 발견 (부족함, 웹 검색 필요):\n\n"
         for idx, fact in enumerate(facts, 1):
             age_days = (datetime.now().timestamp() - fact['created_at']) / 86400
             formatted += f"{idx}. [신뢰도 {fact['score']:.2f}, {age_days:.0f}일 전]\n"
             formatted += f"   {fact['text'][:300]}...\n"
-            formatted += f"   출처: {fact['source']} ({fact['url'][:50]}...)\n\n"
-        
+            formatted += f"   출처: {fact['source']} ({fact.get('url', '')[:50]}...)\n\n"
+        formatted += "추가 정보가 필요합니다. 웹 검색을 사용해주세요."
         return formatted
     
     # 검색 도구 정의
@@ -714,17 +725,31 @@ async def researcher_tools(
     for tc in most_recent_message.tool_calls:
         # ========== 🆕 Vector DB 검색 처리 ==========
         if tc["name"] == "vector_search":
-            facts = vector_store.search_facts(tc["args"]["query"], limit=5, score_threshold=0.75)
+            # threshold를 0.75 → 0.65로 낮춰서 더 많은 결과 가져오기
+            facts = vector_store.search_facts(tc["args"]["query"], limit=5, score_threshold=0.65)
             
             if facts:
-                formatted = f"✅ Vector DB에서 {len(facts)}개 관련 정보 발견:\n\n"
-                for idx, fact in enumerate(facts, 1):
-                    from datetime import datetime
-                    age_days = (datetime.now().timestamp() - fact['created_at']) / 86400
-                    formatted += f"{idx}. [신뢰도 {fact['score']:.2f}, {age_days:.0f}일 전]\n"
-                    formatted += f"   {fact['text'][:300]}...\n"
-                    formatted += f"   출처: {fact['source']} ({fact.get('url', '')[:50]}...)\n\n"
-                content = formatted
+                # 결과가 3개 이상이면 충분하다고 판단
+                if len(facts) >= 3:
+                    formatted = f"✅ Vector DB에서 {len(facts)}개 관련 정보 발견 (충분함):\n\n"
+                    for idx, fact in enumerate(facts, 1):
+                        from datetime import datetime
+                        age_days = (datetime.now().timestamp() - fact['created_at']) / 86400
+                        formatted += f"{idx}. [신뢰도 {fact['score']:.2f}, {age_days:.0f}일 전]\n"
+                        formatted += f"   {fact['text'][:300]}...\n"
+                        formatted += f"   출처: {fact['source']} ({fact.get('url', '')[:50]}...)\n\n"
+                    content = formatted
+                else:
+                    # 결과가 부족하면 웹 검색 필요
+                    formatted = f"⚠️ Vector DB에서 {len(facts)}개 관련 정보 발견 (부족함, 웹 검색 필요):\n\n"
+                    for idx, fact in enumerate(facts, 1):
+                        from datetime import datetime
+                        age_days = (datetime.now().timestamp() - fact['created_at']) / 86400
+                        formatted += f"{idx}. [신뢰도 {fact['score']:.2f}, {age_days:.0f}일 전]\n"
+                        formatted += f"   {fact['text'][:300]}...\n"
+                        formatted += f"   출처: {fact['source']} ({fact.get('url', '')[:50]}...)\n\n"
+                    formatted += "추가 정보가 필요합니다. 웹 검색을 사용해주세요."
+                    content = formatted
             else:
                 content = "Vector DB에 관련 정보가 없습니다. 웹 검색을 사용해주세요."
             

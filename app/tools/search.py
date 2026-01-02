@@ -35,47 +35,88 @@ class SearchWithFallback:
         search_depth: str = "advanced",
         enable_verification: bool = True
     ) -> Dict[str, Any]:
-        """검색 실행 (Redis 캐싱 → 교차 검증)"""
+        """검색 실행 (Redis 캐싱 → 동적 깊이 조정 → 교차 검증)"""
         
         # 0차: Redis 캐시 확인 (검색 쿼리 캐싱)
         cached_result = research_cache.get(query, domain="search", prefix="query")
         if cached_result:
             return cached_result
         
-        # 교차 검증 활성화 시: Tavily + DuckDuckGo 동시 검색
-        if enable_verification and self.tavily:
-            return await self._search_with_verification(query, max_results, search_depth)
+        # 동적 깊이 조정: basic → intermediate → advanced
+        # 첫 검색은 basic으로 빠르게 시작
+        initial_depth = "basic"
+        initial_max_results = min(max_results, 3)  # 첫 검색은 3개만
         
-        # 교차 검증 비활성화: 기존 방식 (Tavily → Serper Fallback)
+        # 교차 검증 활성화 시: Tavily + Serper Fallback
+        if enable_verification and self.tavily:
+            return await self._search_with_verification_dynamic(
+                query, max_results, search_depth, initial_depth, initial_max_results
+            )
+        
+        # 교차 검증 비활성화: 동적 깊이 조정
         if self.tavily:
-            tavily_result = await self._search_tavily(query, max_results, search_depth)
-            if tavily_result["success"]:
-                research_cache.set(query, tavily_result, domain="search", prefix="query")
-                return tavily_result
+            result = await self._search_tavily_dynamic(
+                query, max_results, search_depth, initial_depth, initial_max_results
+            )
+            if result["success"]:
+                research_cache.set(query, result, domain="search", prefix="query")
+                return result
         
         # Serper Fallback
-        serper_result = await self._search_serper(query, max_results)
+        serper_result = await self._search_serper(query, initial_max_results)
         if serper_result.get("success"):
             research_cache.set(query, serper_result, domain="search", prefix="query")
+            return serper_result
+        
+        # 결과 부족 시 max_results 확장하여 재시도
+        if initial_max_results < max_results:
+            serper_result = await self._search_serper(query, max_results)
+            if serper_result.get("success"):
+                research_cache.set(query, serper_result, domain="search", prefix="query")
+                return serper_result
         
         return serper_result
     
-    async def _search_with_verification(
+    async def _search_with_verification_dynamic(
         self,
         query: str,
         max_results: int,
-        search_depth: str
+        target_depth: str,
+        initial_depth: str,
+        initial_max_results: int
     ) -> Dict[str, Any]:
-        """Tavily 우선, 실패 시 Serper.dev Fallback"""
-        print(f"🔍 [검색] Tavily 우선 검색: {query}")
+        """동적 깊이 조정: basic → intermediate → advanced"""
+        print(f"🔍 [검색] Tavily 우선 검색 (동적 깊이): {query}")
         
-        # Tavily 먼저 시도
-        tavily_result = await self._search_tavily(query, max_results, search_depth)
+        # 1단계: basic으로 빠르게 시도
+        tavily_result = await self._search_tavily(query, initial_max_results, initial_depth)
         
         if tavily_result.get("success"):
-            print(f"✅ [Tavily] 충분한 결과 확보")
-            research_cache.set(query, tavily_result, domain="search", prefix="query")
-            return tavily_result
+            # 결과가 충분하면 바로 반환
+            if len(tavily_result.get("results", [])) >= 2:
+                print(f"✅ [Tavily] 충분한 결과 확보 (basic, {len(tavily_result['results'])}개)")
+                research_cache.set(query, tavily_result, domain="search", prefix="query")
+                return tavily_result
+        
+        # 2단계: 결과 부족 시 intermediate로 재시도
+        if initial_depth == "basic" and target_depth in ["intermediate", "advanced"]:
+            print(f"⚠️ [Tavily] basic 결과 부족, intermediate로 재시도...")
+            tavily_result = await self._search_tavily(query, max_results, "intermediate")
+            
+            if tavily_result.get("success") and len(tavily_result.get("results", [])) >= 2:
+                print(f"✅ [Tavily] 충분한 결과 확보 (intermediate, {len(tavily_result['results'])}개)")
+                research_cache.set(query, tavily_result, domain="search", prefix="query")
+                return tavily_result
+        
+        # 3단계: 여전히 부족하면 advanced로 재시도
+        if target_depth == "advanced":
+            print(f"⚠️ [Tavily] intermediate 결과 부족, advanced로 재시도...")
+            tavily_result = await self._search_tavily(query, max_results, "advanced")
+            
+            if tavily_result.get("success"):
+                print(f"✅ [Tavily] 결과 확보 (advanced, {len(tavily_result.get('results', []))}개)")
+                research_cache.set(query, tavily_result, domain="search", prefix="query")
+                return tavily_result
         
         # Tavily 실패 시에만 Serper 시도
         print(f"⚠️ [Tavily] 실패, Serper.dev 시도...")
@@ -95,6 +136,46 @@ class SearchWithFallback:
             "error": "모든 검색 엔진 실패",
             "query": query
         }
+    
+    async def _search_with_verification(
+        self,
+        query: str,
+        max_results: int,
+        search_depth: str
+    ) -> Dict[str, Any]:
+        """기존 메서드 (하위 호환성)"""
+        return await self._search_with_verification_dynamic(
+            query, max_results, search_depth, "basic", min(max_results, 3)
+        )
+    
+    async def _search_tavily_dynamic(
+        self,
+        query: str,
+        max_results: int,
+        target_depth: str,
+        initial_depth: str,
+        initial_max_results: int
+    ) -> Dict[str, Any]:
+        """동적 깊이 조정: basic → intermediate → advanced"""
+        # 1단계: basic으로 빠르게 시도
+        result = await self._search_tavily(query, initial_max_results, initial_depth)
+        
+        if result.get("success") and len(result.get("results", [])) >= 2:
+            return result
+        
+        # 2단계: 결과 부족 시 intermediate로 재시도
+        if initial_depth == "basic" and target_depth in ["intermediate", "advanced"]:
+            result = await self._search_tavily(query, max_results, "intermediate")
+            if result.get("success") and len(result.get("results", [])) >= 2:
+                return result
+        
+        # 3단계: 여전히 부족하면 advanced로 재시도
+        if target_depth == "advanced":
+            result = await self._search_tavily(query, max_results, "advanced")
+            if result.get("success"):
+                return result
+        
+        return result
     
     def _cross_validate_results(
         self,
@@ -175,16 +256,24 @@ class SearchWithFallback:
         max_results: int,
         search_depth: str
     ) -> Dict[str, Any]:
-        """Tavily 검색"""
+        """Tavily 검색 (타임아웃 적용)"""
         try:
-            print(f"🔍 [Tavily] 검색 중: {query}")
+            print(f"🔍 [Tavily] 검색 중 ({search_depth}): {query}")
             
-            results = self.tavily.search(
-                query=query,
-                max_results=max_results,
-                search_depth=search_depth,
-                include_raw_content=False,
-                days=90  # 최근 3개월(90일) 이내 정보만
+            # 타임아웃 설정: basic/intermediate는 8초, advanced는 12초
+            timeout = 8.0 if search_depth in ["basic", "intermediate"] else 12.0
+            
+            # 동기 함수를 비동기로 실행 (타임아웃 적용)
+            results = await asyncio.wait_for(
+                asyncio.to_thread(
+                    self.tavily.search,
+                    query=query,
+                    max_results=max_results,
+                    search_depth=search_depth,
+                    include_raw_content=False,
+                    days=90
+                ),
+                timeout=timeout
             )
             
             if results and results.get("results"):
@@ -213,6 +302,10 @@ class SearchWithFallback:
             print(f"⚠️ [Tavily] 결과 없음")
             return {"success": False}
         
+        except asyncio.TimeoutError:
+            print(f"⏱️ [Tavily] 타임아웃 ({search_depth})")
+            return {"success": False, "timeout": True}
+        
         except Exception as e:
             print(f"❌ [Tavily] 오류: {str(e)}")
             return {"success": False}
@@ -222,7 +315,7 @@ class SearchWithFallback:
         query: str, 
         max_results: int
     ) -> Dict[str, Any]:
-        """Serper.dev 검색 (Google 검색 결과 제공)"""
+        """Serper.dev 검색 (Google 검색 결과 제공, 타임아웃 5초)"""
         
         if not self.serper_api_key:
             print(f"❌ [Serper] API 키 없음")
@@ -247,9 +340,9 @@ class SearchWithFallback:
                 'num': max_results
             }
             
-            # aiohttp로 비동기 요청
+            # aiohttp로 비동기 요청 (타임아웃 5초)
             async with aiohttp.ClientSession() as session:
-                async with session.post(url, headers=headers, json=payload, timeout=10) as response:
+                async with session.post(url, headers=headers, json=payload, timeout=5) as response:
                     if response.status == 200:
                         data = await response.json()
                         
@@ -316,10 +409,10 @@ class SearchWithFallback:
             }
     
     def _validate_results(self, results: List[Dict], query: str) -> bool:
-        """검색 결과 품질 검증"""
+        """검색 결과 품질 검증 (완화된 기준)"""
         
-        # 1. 최소 결과 개수 확인
-        if len(results) < 2:
+        # 1. 최소 결과 개수 확인 (완화: 2개 → 1개)
+        if len(results) < 1:
             return False
         
         # 2. 관련성 확인 (키워드 매칭)
@@ -336,8 +429,8 @@ class SearchWithFallback:
             )
         )
         
-        # 최소 50% 관련성
-        return relevant_count >= len(results) * 0.5
+        # 관련성 기준 완화 (50% → 30%)
+        return relevant_count >= len(results) * 0.3
     
     def _extract_keywords(self, query: str) -> List[str]:
         """쿼리에서 키워드 추출"""
