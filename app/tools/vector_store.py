@@ -22,6 +22,7 @@ class VectorStore:
     def __init__(
         self,
         collection_name: str = "ai_tool_facts",
+        query_collection_name: str = "ai_tool_queries",  # 질문-캐시 키 매핑용
         embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2",
         qdrant_url: Optional[str] = None,
         qdrant_api_key: Optional[str] = None,
@@ -34,6 +35,7 @@ class VectorStore:
             qdrant_api_key: Qdrant API 키 (클라우드 사용 시)
         """
         self.collection_name = collection_name
+        self.query_collection_name = query_collection_name
         
         # Qdrant 클라이언트 초기화
         qdrant_url = qdrant_url or os.getenv("QDRANT_URL", "localhost")
@@ -70,6 +72,7 @@ class VectorStore:
         
         # 컬렉션 생성 (없으면)
         self._ensure_collection()
+        self._ensure_query_collection()
     
     def _ensure_collection(self):
         """컬렉션이 없으면 생성"""
@@ -94,6 +97,29 @@ class VectorStore:
         except Exception as e:
             print(f"❌ 컬렉션 생성 실패: {e}")
             self.available = False
+    
+    def _ensure_query_collection(self):
+        """질문-캐시 키 매핑 컬렉션 생성"""
+        if not self.available:
+            return
+        
+        try:
+            collections = self.client.get_collections().collections
+            collection_names = [c.name for c in collections]
+            
+            if self.query_collection_name not in collection_names:
+                self.client.create_collection(
+                    collection_name=self.query_collection_name,
+                    vectors_config=VectorParams(
+                        size=self.embedding_dim,
+                        distance=Distance.COSINE
+                    )
+                )
+                print(f"✅ Qdrant 질문 컬렉션 생성: {self.query_collection_name}")
+            else:
+                print(f"✅ Qdrant 질문 컬렉션 존재: {self.query_collection_name}")
+        except Exception as e:
+            print(f"❌ 질문 컬렉션 생성 실패: {e}")
     
     def _generate_id(self, text: str, source: str) -> str:
         """고유 ID 생성 (중복 방지)"""
@@ -283,6 +309,129 @@ class VectorStore:
             }
         except Exception as e:
             return {"available": False, "error": str(e)}
+    
+    def add_query_mapping(
+        self,
+        query: str,
+        cache_key: str,
+        normalized_text: str,
+        domain: str = "general",
+        ttl_days: int = 7
+    ) -> bool:
+        """
+        질문-캐시 키 매핑 저장 (유사 질문 검색용)
+        
+        Args:
+            query: 원본 질문
+            cache_key: 캐시 키
+            normalized_text: 정규화된 질문
+            domain: 도메인
+            ttl_days: 유효 기간 (일)
+        
+        Returns:
+            성공 여부
+        """
+        if not self.available:
+            return False
+        
+        try:
+            # 질문 임베딩 생성
+            query_embedding = self.embedding_model.encode(query).tolist()
+            
+            # 메타데이터 구성
+            expire_timestamp = int((datetime.now() + timedelta(days=ttl_days)).timestamp())
+            payload = {
+                "query": query,
+                "cache_key": cache_key,
+                "normalized_text": normalized_text,
+                "domain": domain,
+                "created_at": int(datetime.now().timestamp()),
+                "expire_at": expire_timestamp
+            }
+            
+            # Point 생성
+            point_id = self._generate_id(query, cache_key)
+            point = PointStruct(
+                id=point_id,
+                vector=query_embedding,
+                payload=payload
+            )
+            
+            self.client.upsert(
+                collection_name=self.query_collection_name,
+                points=[point]
+            )
+            print(f"✅ 질문-캐시 키 매핑 저장: '{query[:50]}...' → {cache_key[:8]}...")
+            return True
+        
+        except Exception as e:
+            print(f"❌ 질문 매핑 저장 실패: {e}")
+            return False
+    
+    def search_similar_query(
+        self,
+        query: str,
+        domain: str = "general",
+        limit: int = 1,
+        score_threshold: float = 0.85  # 높은 유사도만 (85% 이상)
+    ) -> Optional[Dict[str, Any]]:
+        """
+        유사한 질문 검색 (기존 캐시 키 찾기)
+        
+        Args:
+            query: 검색할 질문
+            domain: 도메인
+            limit: 최대 결과 개수
+            score_threshold: 최소 유사도 (0~1)
+        
+        Returns:
+            {"query": "...", "cache_key": "...", "score": 0.9} 또는 None
+        """
+        if not self.available:
+            return None
+        
+        try:
+            # 쿼리 임베딩 생성
+            query_embedding = self.embedding_model.encode(query).tolist()
+            
+            # 현재 시간 (만료된 매핑 제외)
+            current_timestamp = int(datetime.now().timestamp())
+            
+            # 검색 (만료되지 않고 같은 도메인만)
+            results = self.client.search(
+                collection_name=self.query_collection_name,
+                query_vector=query_embedding,
+                limit=limit,
+                score_threshold=score_threshold,
+                query_filter=Filter(
+                    must=[
+                        FieldCondition(
+                            key="expire_at",
+                            range=Range(gte=current_timestamp)
+                        ),
+                        FieldCondition(
+                            key="domain",
+                            match={"value": domain}
+                        )
+                    ]
+                )
+            )
+            
+            if results and len(results) > 0:
+                result = results[0]
+                print(f"✅ 유사 질문 발견: '{result.payload.get('query', '')[:50]}...' (유사도: {result.score:.3f})")
+                return {
+                    "query": result.payload.get("query", ""),
+                    "cache_key": result.payload.get("cache_key", ""),
+                    "normalized_text": result.payload.get("normalized_text", ""),
+                    "score": result.score
+                }
+            
+            return None
+        
+        except Exception as e:
+            print(f"❌ 유사 질문 검색 실패: {e}")
+            return None
     
     def clear_all(self):
         """모든 facts 삭제 (테스트용)"""

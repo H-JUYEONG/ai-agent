@@ -306,6 +306,96 @@ async def clarify_with_user(
     
     print(f"⚠️ [캐시 MISS] 정규화된 쿼리: '{normalized['normalized_text']}' (키워드: {normalized['keywords']})")
     
+    # ========== 🆕 3단계: 벡터 DB로 유사 질문 검색 ==========
+    # 캐시 미스 시 유사한 질문이 있는지 벡터 DB에서 검색
+    similar_query = vector_store.search_similar_query(
+        query=last_user_message,
+        domain=domain,
+        limit=1,
+        score_threshold=0.85  # 높은 유사도만 (85% 이상)
+    )
+    
+    if similar_query and similar_query.get("cache_key"):
+        similar_cache_key = similar_query["cache_key"]
+        print(f"🔍 [유사 질문 발견] 유사도: {similar_query['score']:.3f}, 기존 질문: '{similar_query['query'][:50]}...'")
+        print(f"🔍 [유사 질문] 캐시 키 재사용: {similar_cache_key[:16]}...")
+        
+        # 유사 질문의 캐시 키로 Redis에서 답변 가져오기
+        cached_answer = research_cache.get(similar_cache_key, domain=domain, prefix="final")
+        if cached_answer:
+            print(f"✅ [유사 질문 캐시 HIT] 최종 답변 반환 (유사 질문의 캐시 키: {similar_cache_key[:16]}...)")
+            
+            # 리포트 본문 추출 및 인사 멘트 생성 (기존 로직과 동일)
+            cached_content = cached_answer["content"]
+            report_body = cached_content.strip()
+            
+            # [GREETING] 태그 제거
+            if "[GREETING]" in cached_content and "[/GREETING]" in cached_content:
+                match = re.search(r'\[GREETING\](.*?)\[/GREETING\]', cached_content, re.DOTALL)
+                if match:
+                    report_body = cached_content.replace(match.group(0), "").strip()
+            
+            if not report_body or len(report_body) < 50:
+                report_body = cached_content.strip()
+            
+            if len(report_body) >= 200:
+                # 인사 멘트 생성 (기존 로직과 동일)
+                print(f"✅ [유사 질문 처리] 리포트 본문은 캐시에서 가져옴 ({len(report_body)}자), 인사 멘트는 새로 생성")
+                
+                # final_report_generation과 동일한 방식으로 인사 멘트 생성
+                greeting_model_config = {
+                    "model": configurable.final_report_model,
+                    "max_tokens": configurable.final_report_model_max_tokens,
+                    "api_key": get_api_key_for_model(configurable.final_report_model, config),
+                }
+                
+                messages_context = get_buffer_string(messages) if messages else last_user_message
+                
+                greeting_prompt = f"""당신은 코딩 AI 도구 추천 전문가입니다. 사용자 질문에 맞는 자연스럽고 상세한 인사 멘트를 생성하세요.
+
+사용자 메시지:
+{messages_context}
+
+**원칙:**
+- 사용자의 현재 질문 내용과 의도를 정확히 파악하여 그에 맞는 자연스러운 멘트를 생성
+- 질문의 핵심 키워드(팀 규모, 목적, 요구사항, 도메인 등)를 반영
+- 질문에 언급된 구체적인 내용(팀 규모, 목적, 요구사항 등)을 반드시 포함
+- 자연스럽고 친절한 톤 유지
+- 적절한 길이 (40-100자 정도, 너무 짧지 않게)
+
+인사 멘트만 출력하세요 ([GREETING] 태그 없이, 다른 설명 없이):"""
+                
+                try:
+                    greeting_model = configurable_model.with_config(greeting_model_config)
+                    greeting_response = await greeting_model.ainvoke([HumanMessage(content=greeting_prompt)])
+                    greeting = str(greeting_response.content).strip().strip('"\'`').strip()
+                    
+                    if not greeting or len(greeting) < 30:
+                        greeting = f"네! {last_user_message[:30]}에 대해 조사해드리겠습니다."
+                    
+                    print(f"✅ [유사 질문 처리] 인사 멘트 생성 완료: '{greeting}'")
+                    
+                    return Command(
+                        goto="__end__",
+                        update={"messages": [
+                            AIMessage(content=greeting),
+                            AIMessage(content=report_body)
+                        ]}
+                    )
+                except Exception as e:
+                    print(f"⚠️ [유사 질문 처리] 인사 멘트 생성 실패: {e}")
+                    greeting = f"네! {last_user_message[:30]}에 대해 조사해드리겠습니다."
+                    return Command(
+                        goto="__end__",
+                        update={"messages": [
+                            AIMessage(content=greeting),
+                            AIMessage(content=report_body)
+                        ]}
+                    )
+    
+    # 캐시 미스 및 유사 질문도 없음 → 새로 생성
+    print(f"⚠️ [캐시 MISS + 유사 질문 없음] 새로 생성 진행")
+    
     model_config = {
         "model": configurable.research_model,
         "max_tokens": configurable.research_model_max_tokens,
@@ -1165,6 +1255,21 @@ async def final_report_generation(state: AgentState, config: RunnableConfig):
                 prefix="final"
             )
             print(f"✅ [캐시 저장] 최종 답변 저장 완료 (캐시키: {cache_key[:16]}..., TTL: 7일)")
+            
+            # ========== 🆕 질문-캐시 키 매핑을 벡터 DB에 저장 (유사 질문 검색용) ==========
+            # 원본 질문 가져오기
+            messages_list = state.get("messages", [])
+            last_user_message = messages_list[-1].content if messages_list and isinstance(messages_list[-1], HumanMessage) else ""
+            
+            if last_user_message:
+                vector_store.add_query_mapping(
+                    query=last_user_message,
+                    cache_key=cache_key,
+                    normalized_text=normalized_query.get("normalized_text", ""),
+                    domain=domain,
+                    ttl_days=7
+                )
+                print(f"✅ [벡터 DB 저장] 질문-캐시 키 매핑 저장 완료 (질문: '{last_user_message[:50]}...')")
         else:
             print(f"⚠️ [캐시 저장 실패] normalized_query 없음: {normalized_query}")
         
