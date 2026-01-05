@@ -1,13 +1,76 @@
-// 페이지 로드 시 AI 환영 메시지
+// 도메인은 항상 코딩으로 고정
+let currentDomain = "코딩";
+
+// 대화 이력 저장
+let conversationHistory = [];
+
+// localStorage 키
+const STORAGE_KEY = 'ai_agent_conversation';
+
+// 페이지 로드 시 대화 복원 또는 초기 환영 메시지
 document.addEventListener('DOMContentLoaded', function() {
-    setTimeout(() => {
-        appendMessageWithOptions();
-    }, 300);
+    // 저장된 대화 복원
+    const savedConversation = localStorage.getItem(STORAGE_KEY);
+    
+    if (savedConversation) {
+        try {
+            const parsed = JSON.parse(savedConversation);
+            conversationHistory = parsed.history || [];
+            const savedMessages = parsed.messages || [];
+            
+            // 저장된 메시지 복원 (중복 제거)
+            const messages = document.getElementById("messages");
+            messages.innerHTML = '';
+            
+            const seenContents = new Set(); // 중복 체크용
+            
+            savedMessages.forEach(msg => {
+                // 텍스트만 추출하여 중복 체크 (HTML 태그 제거)
+                const textContent = msg.content.replace(/<[^>]+>/g, '').trim();
+                const contentKey = `${msg.role}:${textContent}`;
+                
+                if (msg.content && textContent && !seenContents.has(contentKey)) {
+                    const div = document.createElement("div");
+                    div.className = `message ${msg.role}`;
+                    
+                    // HTML 플래그가 있으면 innerHTML로, 없으면 formatMarkdown 사용
+                    if (msg.isHtml) {
+                        div.innerHTML = msg.content;
+                    } else {
+                        div.innerHTML = formatMarkdown(msg.content);
+                    }
+                    
+                    messages.appendChild(div);
+                    seenContents.add(contentKey);
+                }
+            });
+            
+            messages.scrollTop = messages.scrollHeight;
+            console.log('✅ 대화 복원 완료:', savedMessages.length, '개 메시지');
+        } catch (e) {
+            console.error('대화 복원 실패:', e);
+            // 복원 실패 시 초기화
+            localStorage.removeItem(STORAGE_KEY);
+            setTimeout(() => {
+                appendMessageWithOptions();
+            }, 300);
+        }
+    } else {
+        // 저장된 대화가 없으면 초기 환영 메시지 표시
+        setTimeout(() => {
+            appendMessageWithOptions();
+        }, 300);
+    }
 });
 
 // 초기 환영 메시지 추가
 function appendMessageWithOptions() {
     const messages = document.getElementById("messages");
+    
+    // 이미 메시지가 있으면 환영 메시지 추가하지 않음
+    if (messages.children.length > 0) {
+        return;
+    }
     
     // 메시지 말풍선
     const messageDiv = document.createElement("div");
@@ -15,13 +78,63 @@ function appendMessageWithOptions() {
     messageDiv.innerHTML = "안녕하세요! 👋 코딩 AI 도입 의사결정 어시스턴트입니다.<br><br>개인 또는 팀의 상황을 알려주시면, 그에 맞는 코딩 AI 도구를 추천해드립니다.<br><br>다음 정보를 알려주세요:<br>• 👤 <strong>사용 형태</strong> (예: 개인 사용, 5명 팀)<br>• 💰 <strong>예산</strong> (예: 월 50만원 이하)<br>• 🔒 <strong>보안 요구사항</strong> (예: 코드가 외부로 유출되면 안 됨)<br>• 💻 <strong>주요 사용 언어</strong> (예: Python, JavaScript, Java)<br>• 📋 <strong>업무 특성</strong> (예: 웹 개발, 모바일 앱, 데이터 분석)<br><br>💡 <strong>모든 정보를 주실 필요는 없어요. 알려주신 만큼 맞춤 추천해드립니다!</strong>";
     messages.appendChild(messageDiv);
     messages.scrollTop = messages.scrollHeight;
+    
+    // localStorage에 저장 (환영 메시지 포함)
+    saveConversation();
 }
 
-// 도메인은 항상 코딩으로 고정
-let currentDomain = "코딩";
-
-// 대화 이력 저장
-let conversationHistory = [];
+// 대화를 localStorage에 저장
+function saveConversation() {
+    try {
+        const messages = document.getElementById("messages");
+        const messageElements = Array.from(messages.children);
+        
+        // 화면의 메시지를 직접 저장 (중복 방지)
+        const messagesToSave = [];
+        const seenContents = new Set(); // 중복 체크용
+        
+        messageElements.forEach(el => {
+            // 로딩 인디케이터는 제외
+            if (el.classList.contains('loading')) {
+                return;
+            }
+            
+            const role = el.classList.contains('user') ? 'user' : 'assistant';
+            
+            // HTML 태그가 포함되어 있는지 확인
+            const innerHTML = el.innerHTML || '';
+            const textContent = el.textContent || el.innerText || '';
+            const hasHtmlTags = /<[^>]+>/.test(innerHTML);
+            
+            // HTML 태그가 있으면 innerHTML 사용, 없으면 textContent 사용
+            const content = hasHtmlTags ? innerHTML : textContent.trim();
+            
+            // 중복 체크: 동일한 내용이 이미 있으면 스킵
+            const contentKey = `${role}:${textContent.trim()}`;
+            if (content && !seenContents.has(contentKey)) {
+                messagesToSave.push({ 
+                    role, 
+                    content: content,
+                    isHtml: hasHtmlTags  // HTML 여부 플래그
+                });
+                seenContents.add(contentKey);
+            }
+        });
+        
+        localStorage.setItem(STORAGE_KEY, JSON.stringify({
+            history: conversationHistory,
+            messages: messagesToSave,
+            timestamp: Date.now()
+        }));
+    } catch (e) {
+        console.error('대화 저장 실패:', e);
+        // localStorage 용량 초과 시 오래된 대화 삭제
+        if (e.name === 'QuotaExceededError') {
+            console.warn('localStorage 용량 초과, 대화 초기화');
+            localStorage.removeItem(STORAGE_KEY);
+        }
+    }
+}
 
 // 메시지 전송
 async function sendMessage() {
@@ -32,6 +145,15 @@ async function sendMessage() {
     // 사용자 메시지 추가
     appendMessage("user", message);
     input.value = "";
+    
+    // 사용자 메시지를 이력에 추가
+    conversationHistory.push({
+        role: "user",
+        content: message
+    });
+    
+    // localStorage에 저장
+    saveConversation();
     
     // 로딩 표시
     const loadingId = showLoading();
@@ -61,18 +183,16 @@ async function sendMessage() {
         const data = await response.json();
         removeLoading(loadingId);
         
-        // 사용자 메시지를 이력에 추가
-        conversationHistory.push({
-            role: "user",
-            content: message
-        });
-        
         // 배열이면 여러 메시지로, 문자열이면 하나의 메시지로
         if (Array.isArray(data.reply)) {
             // 여러 메시지를 순차적으로 추가
             data.reply.forEach((msg, index) => {
                 setTimeout(() => {
                     appendMessage("assistant", msg);
+                    // 마지막 메시지일 때만 저장
+                    if (index === data.reply.length - 1) {
+                        saveConversation();
+                    }
                 }, index * 500); // 0.5초 간격으로 추가
             });
             // AI 응답을 이력에 추가 (마지막 메시지만)
@@ -87,6 +207,8 @@ async function sendMessage() {
                 role: "assistant",
                 content: data.reply
             });
+            // localStorage에 저장
+            saveConversation();
         }
     } catch (error) {
         console.error("Error:", error);
@@ -176,6 +298,9 @@ function clearChat() {
     
     // 대화 이력 초기화
     conversationHistory = [];
+    
+    // localStorage에서도 삭제
+    localStorage.removeItem(STORAGE_KEY);
     
     // AI 환영 메시지 다시 표시
     setTimeout(() => {
