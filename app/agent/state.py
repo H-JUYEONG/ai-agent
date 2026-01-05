@@ -138,6 +138,8 @@ class AgentState(MessagesState):
     normalized_query: Optional[dict] = None  # 정규화된 쿼리 정보
     constraints: Optional[dict] = None  # 하드 제약 조건 (필터링 규칙)
     question_type: Optional[str] = None  # LLM이 판단한 질문 유형
+    tool_facts: Annotated[List[dict], override_reducer] = []  # 구조화된 도구 사실 (Fact Model)
+    decision_result: Optional[dict] = None  # 판단 결과 (DecisionResult)
 
 
 class SupervisorState(TypedDict):
