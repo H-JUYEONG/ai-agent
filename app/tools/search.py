@@ -441,50 +441,80 @@ class SearchWithFallback:
         return keywords[:5]  # 최대 5개
     
     def extract_pricing_info(self, results: List[Dict]) -> Dict[str, Any]:
-        """검색 결과에서 가격 정보 추출 및 검증"""
-        pricing_patterns = [
-            r'(?:free|무료)',
-            r'(?:plus|pro|team|max|advanced)\s*\$?\s*(\d+(?:\.\d+)?)\s*/?\s*(?:월|month|mo)',
-            r'\$(\d+(?:\.\d+)?)\s*/?\s*(?:월|month|mo)',
-            r'(\d+(?:\.\d+)?)\s*(?:USD|달러)\s*/?\s*(?:월|month|mo)',
-        ]
+        """검색 결과에서 가격 정보 추출 및 검증
+        
+        주의: 이 함수는 가격 정보만 추출합니다. 
+        - 플랜명은 검색 결과에서 실제로 나온 것을 그대로 사용 (하드코딩 금지)
+        - 개인용/비즈니스용 구별은 에이전트(LLM)가 검색 결과의 전체 컨텍스트를 보고 판단해야 합니다.
+        """
         
         found_pricing = {}
         official_pricing = {}
         
         for result in results:
-            content = (result.get("title", "") + " " + result.get("content", "")).lower()
+            # 원본 텍스트 유지 (대소문자 구별)
+            title = result.get("title", "")
+            content = result.get("content", "")
+            full_text = f"{title} {content}"
             url = result.get("url", "").lower()
             is_official = result.get("is_official", False)
             
+            # 가격 패턴 (플랜명은 검색 결과에서 실제로 나온 것을 추출)
+            # 주의: 하드코딩된 플랜명(Free, Pro, Plus 등) 사용 금지
+            pricing_patterns = [
+                # 플랜명과 가격 함께 (예: "Pro $10/월", "Pro+ $20/월", "Business $19/월")
+                # 플랜명은 도구마다 다르므로 하드코딩하지 않고 실제 검색 결과에서 추출
+                (r'(?:^|\s)([A-Za-z가-힣][A-Za-z0-9가-힣\s\+]*?)\s*\$?\s*(\d+(?:\.\d+)?)\s*/?\s*(?:월|month|mo)', None, None),
+                # 일반 가격 (예: "$10/월", "10 USD/월")
+                (r'\$(\d+(?:\.\d+)?)\s*/?\s*(?:월|month|mo)', None, None),
+                (r'(\d+(?:\.\d+)?)\s*(?:USD|달러)\s*/?\s*(?:월|month|mo)', None, None),
+                # Free/무료 (특별 처리)
+                (r'(?:^|\s)(?:free|무료)(?:\s|$)', None, "무료"),
+            ]
+            
             # 가격 정보 추출
-            for pattern in pricing_patterns:
-                matches = re.finditer(pattern, content, re.IGNORECASE)
+            for pattern, default_plan, default_price in pricing_patterns:
+                matches = re.finditer(pattern, full_text, re.IGNORECASE | re.MULTILINE)
                 for match in matches:
-                    plan_name = None
-                    price = None
+                    plan_name = default_plan
+                    price = default_price
                     
-                    # 플랜명 추출
-                    if "free" in match.group(0).lower() or "무료" in match.group(0):
-                        plan_name = "Free"
-                        price = "무료"
-                    elif "plus" in match.group(0).lower():
-                        plan_name = "Plus"
-                        price = f"${match.group(1) if match.lastindex else '20'}/월"
-                    elif "pro" in match.group(0).lower():
-                        plan_name = "Pro"
-                        price = f"${match.group(1) if match.lastindex else '200'}/월"
-                    elif match.lastindex:
-                        price = f"${match.group(1)}/월"
+                    # 플랜명 및 가격 추출
+                    groups = match.groups()
+                    if default_price is None and len(groups) >= 2:
+                        # 플랜명과 가격 모두 있는 경우
+                        plan_name_match = groups[0].strip()
+                        price_match = groups[1]
+                        if plan_name_match and price_match:
+                            # 플랜명은 검색 결과에서 나온 그대로 사용 (하드코딩 금지)
+                            plan_name = plan_name_match
+                            price = f"${price_match}/월"
+                    elif default_price is None and len(groups) >= 1:
+                        # 가격만 있는 경우
+                        price_match = groups[0]
+                        if price_match:
+                            price = f"${price_match}/월"
+                            plan_name = None  # 플랜명 없음
+                    elif default_price:
+                        # Free/무료인 경우
+                        price = default_price
+                        plan_name = "Free"  # Free는 일반적으로 사용되지만, 실제 검색 결과에서 확인 필요
                     
-                    if plan_name and price:
-                        key = f"{plan_name}_{price}"
+                    # 가격 정보 저장 (플랜명이 있으면 포함, 없으면 가격만)
+                    if price:
+                        # 키 생성 (플랜명이 있으면 포함)
+                        if plan_name:
+                            key = f"{plan_name}_{price}"
+                        else:
+                            key = f"unknown_{price}"
+                        
                         if key not in found_pricing:
                             found_pricing[key] = {
-                                "plan": plan_name,
+                                "plan": plan_name,  # 플랜명이 없으면 None
                                 "price": price,
                                 "sources": [],
-                                "official_count": 0
+                                "official_count": 0,
+                                "context": full_text[:300]  # 컨텍스트 보존 (에이전트가 개인용/비즈니스용 판단할 수 있도록)
                             }
                         
                         found_pricing[key]["sources"].append({

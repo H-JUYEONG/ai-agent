@@ -442,7 +442,7 @@ compress_research_system_prompt = """
 
 <가이드라인>
 1. **정보 보존**: 모든 관련 정보를 그대로 포함
-   - **가격 정보는 반드시 보존!** (Free, Plus $20/월, Pro $200/월 등)
+   - **가격 정보는 반드시 보존!** (⚠️ 위 예시는 참고용일 뿐, 검색 결과에서 확인한 실제 플랜명과 가격만 사용!)
    - API 가격도 일단 보존 (나중에 구독료로 대체 가능)
 2. **중복 제거**: 같은 내용이 반복되면 통합
 3. **출처 명시 (매우 중요!)**: 
@@ -563,10 +563,14 @@ final_report_generation_prompt = """
   - [플랜명3] $XX/월
   ```
   * 각 플랜을 줄바꿈으로 나열 (예: "Free - Pro $10/월" 형식 ❌, "- Free $0/월\n- Pro $10/월" 형식 ✅)
-  * 플랜명과 가격을 정확히 표시 (플랜명은 도구마다 다를 수 있음: Individual, Pro, Business, Enterprise, Team, Starter, Plus 등)
+  * ⚠️ **매우 중요**: 플랜명은 도구마다 다릅니다!
+    - 예시 플랜명(Individual, Pro, Business, Enterprise, Team, Starter, Plus 등)은 **참고용일 뿐**이며, 실제 도구의 플랜명과 다를 수 있습니다!
+    - **절대 예시 플랜명을 그대로 사용하지 마세요!** 반드시 검색 결과에서 확인한 실제 플랜명만 사용!
 - ✅ **사용자 형태에 따른 플랜 필터링 (매우 중요!)**:
-  * **개인 사용자**: 개인용 플랜만 표시 (Free, Pro, Individual, Starter, Plus 등) - 팀/기업용 플랜 제외
-  * **팀 사용자**: 팀/기업용 플랜만 표시 (Business, Enterprise, Team 등) - 개인용 플랜(Free, Pro, Individual 등) 제외
+  * **개인 사용자**: 검색 결과에서 "개인용" 또는 "Individual/Personal" 섹션의 플랜만 표시 - 팀/기업용 섹션 완전히 제외
+    - ⚠️ **주의**: 예시 플랜명(Free, Pro, Individual, Starter, Plus 등)은 참고용일 뿐! 실제 플랜명은 검색 결과에서 확인!
+  * **팀 사용자**: 검색 결과에서 "비즈니스용" 또는 "Business/Enterprise" 섹션의 플랜만 표시 - 개인용 섹션 완전히 제외
+    - ⚠️ **주의**: 예시 플랜명(Business, Enterprise, Team 등)은 참고용일 뿐! 실제 플랜명은 검색 결과에서 확인!
   * ⚠️ **예시는 참고용일 뿐, 실제 도구의 플랜명과 가격은 검색 결과에서 확인!**
   * 예시 (참고용):
     - 개인 사용자 질문 → "Free $0/월\n- Pro $10/월" (Business, Enterprise 제외) - ⚠️ 이는 예시일 뿐!
