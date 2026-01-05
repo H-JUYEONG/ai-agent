@@ -39,14 +39,8 @@ async def chat(req: ChatRequest):
         # 시작 시간 기록
         start_time = time.time()
         
-        # 1. 캐시 확인
-        cached_result = research_cache.get(req.message, domain)
-        if cached_result:
-            elapsed_time = time.time() - start_time
-            print(f"✅ 캐시에서 응답 반환 (소요 시간: {elapsed_time:.2f}초)")
-            return {"reply": cached_result["reply"]}
-        
-        # 2. LangGraph 실행
+        # 캐시 확인은 clarify_with_user에서 처리 (인사 멘트 생성 포함)
+        # LangGraph 실행
         print(f"🔍 Deep Research 시작: {req.message} (도메인: {domain})")
         
         # 환경 변수 확인
@@ -105,14 +99,20 @@ async def chat(req: ChatRequest):
             last_msg = ai_messages[-1].content
             second_last_msg = ai_messages[-2].content
             
-            # 첫 번째가 짧고(인사말), 두 번째가 길면(리포트) 분리
-            if len(second_last_msg) < 200 and len(last_msg) > 500:
+            # 인사 멘트는 보통 짧고(200자 미만), 리포트는 길다(200자 이상)
+            # 마지막 2개 메시지가 인사 멘트 + 리포트 조합인지 확인
+            if len(second_last_msg) < 200 and len(last_msg) >= 200:
+                # 인사 멘트(짧음) + 리포트(길음) 조합
                 reply_messages = [second_last_msg, last_msg]
-                print(f"✅ [DEBUG] 인사말 + 리포트 분리: 2개")
+                print(f"✅ [DEBUG] 인사말 + 리포트 분리: 2개 (인사말: {len(second_last_msg)}자, 리포트: {len(last_msg)}자)")
+            elif len(second_last_msg) >= 200 and len(last_msg) < 200:
+                # 리포트(길음) + 인사 멘트(짧음) 순서 (순서가 바뀐 경우)
+                reply_messages = [last_msg, second_last_msg]
+                print(f"✅ [DEBUG] 리포트 + 인사말 분리: 2개 (순서 변경, 인사말: {len(last_msg)}자, 리포트: {len(second_last_msg)}자)")
             else:
-                # 중복이거나 같은 내용이면 마지막 1개만
-                reply_messages = [last_msg]
-                print(f"✅ [DEBUG] 중복 제거 후 1개 메시지")
+                # 둘 다 길거나 둘 다 짧으면 마지막 2개 모두 반환 (안전하게)
+                reply_messages = [second_last_msg, last_msg]
+                print(f"✅ [DEBUG] 마지막 2개 메시지 모두 반환: 2개")
         elif len(ai_messages) == 1:
             reply_messages = [ai_messages[-1].content]
             print(f"✅ [DEBUG] 1개 메시지 감지")

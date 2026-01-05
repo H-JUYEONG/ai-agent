@@ -169,53 +169,132 @@ async def clarify_with_user(
             # 리포트 본문 추출 (캐시에는 리포트 본문만 저장되어 있음)
             report_body = cached_content.strip()
             
+            # 🚨 [GREETING] 태그가 있으면 제거하고 리포트 본문만 추출
+            # 인사 멘트는 캐시에서 가져오지 않고 항상 새로 생성
+            if "[GREETING]" in cached_content and "[/GREETING]" in cached_content:
+                match = re.search(r'\[GREETING\](.*?)\[/GREETING\]', cached_content, re.DOTALL)
+                if match:
+                    # 인사말 태그 제거하고 리포트 본문만 추출
+                    report_body = cached_content.replace(match.group(0), "").strip()
+                    print(f"✅ [캐시] [GREETING] 태그 제거 후 리포트 본문 추출: {len(report_body)}자")
+            
+            # 리포트 본문이 비어있거나 너무 짧으면 원본 사용
+            if not report_body or len(report_body) < 50:
+                print(f"⚠️ [캐시 처리] 리포트 본문이 비어있음 - 원본 캐시 내용 사용")
+                report_body = cached_content.strip()
+            
             # 🚨 캐시 검증: 리포트 본문이 유효한지 확인
             # 리포트가 너무 짧거나(200자 미만) 비어있으면 캐시 무시
             if len(report_body) < 200:
                 print(f"⚠️ [캐시 무시] 리포트 본문이 너무 짧음 ({len(report_body)}자). 캐시 무시하고 새로 생성")
                 # pass - 캐시를 사용하지 않고 아래 연구 프로세스로 진행
             else:
-                # 캐시에서 가져온 답변은 항상 리포트 본문만 있으므로, 멘트를 항상 생성해야 함
-                # [GREETING] 태그가 있는지 확인
-                greeting_from_cache = ""
-                if "[GREETING]" in cached_content and "[/GREETING]" in cached_content:
-                    match = re.search(r'\[GREETING\](.*?)\[/GREETING\]', cached_content, re.DOTALL)
-                    if match:
-                        greeting_from_cache = match.group(1).strip()
-                        report_body = cached_content.replace(match.group(0), "").strip()
-                        print(f"✅ [캐시] [GREETING] 태그에서 인사말 분리: '{greeting_from_cache[:50]}...'")
+                # 🚨 인사 멘트는 항상 새로 생성 (캐시에서 가져오지 않음)
+                # final_report_generation과 동일한 방식으로 인사 멘트 생성 (동일한 모델, 동일한 프롬프트 스타일)
+                print(f"✅ [캐시 처리] 리포트 본문은 캐시에서 가져옴 ({len(report_body)}자), 인사 멘트는 final_report_generation과 동일한 방식으로 생성")
                 
-                # 캐시에 인사말이 있으면 그걸 사용
-                if greeting_from_cache:
-                    print(f"✅ [캐시 처리] 캐시에서 인사말 발견: '{greeting_from_cache[:50]}...'")
-                    return Command(
-                        goto="__end__",
-                        update={"messages": [
-                            AIMessage(content=greeting_from_cache),
-                            AIMessage(content=report_body)
-                        ]}
-                    )
+                # final_report_generation과 동일한 모델 및 설정 사용
+                greeting_model_config = {
+                    "model": configurable.final_report_model,
+                    "max_tokens": configurable.final_report_model_max_tokens,
+                    "api_key": get_api_key_for_model(configurable.final_report_model, config),
+                }
                 
-                # 🚨 캐시에 인사말이 없으면 생성
-                print(f"⚠️ [캐시 처리] 캐시에 인사말 없음 - 멘트 생성")
+                # final_report_generation 프롬프트의 인사 멘트 생성 부분과 동일한 스타일
+                # 사용자 메시지 전체 컨텍스트 제공 (final_report_generation과 동일)
+                messages_context = get_buffer_string(messages) if messages else last_user_message
                 
-                # 간단한 키워드 기반 멘트 생성 (빠르고 안정적)
-                greeting = "네! 조사해드리겠습니다."
+                greeting_prompt = f"""당신은 코딩 AI 도구 추천 전문가입니다. 사용자 질문에 맞는 자연스럽고 상세한 인사 멘트를 생성하세요.
+
+사용자 메시지:
+{messages_context}
+
+**원칙:**
+- 사용자의 현재 질문 내용과 의도를 정확히 파악하여 그에 맞는 자연스러운 멘트를 생성
+- 질문의 핵심 키워드(팀 규모, 목적, 요구사항, 도메인 등)를 반영
+- 질문에 언급된 구체적인 내용(팀 규모, 목적, 요구사항 등)을 반드시 포함
+- 자연스럽고 친절한 톤 유지
+- 적절한 길이 (40-100자 정도, 너무 짧지 않게)
+
+**좋은 예시:**
+- 질문: "저희는 백엔드·프론트엔드 포함해서 8명 규모의 개발팀인데, 코드 작성과 리뷰에 AI를 도입해서 생산성을 높이고 싶습니다. 어떤 도구가 좋을까요?"
+  인사 멘트: "네! 백엔드와 프론트엔드를 포함한 8명 규모의 개발팀에 적합한 AI 도구들을 분석해드리겠습니다. 팀의 코드 작성 및 리뷰 효율성 향상에 도움이 되는 도구를 비교해드리겠습니다."
+
+- 질문: "코드 작성과 리뷰를 위한 AI 도구 추천해줘"
+  인사 멘트: "네! 코드 작성과 리뷰를 위한 최적의 AI 도구를 추천해드리겠습니다."
+
+**나쁜 예시 (너무 짧거나 맥락 없음):**
+- "안녕하세요." (너무 짧음)
+- "AI 도구로 생산성을 높여드리겠습니다." (너무 짧고 구체적이지 않음)
+- "네! 조사해드리겠습니다." (너무 일반적)
+
+인사 멘트만 출력하세요 ([GREETING] 태그 없이, 다른 설명 없이):"""
                 
-                if "가격" in last_user_message or "얼마" in last_user_message or "비용" in last_user_message:
-                    greeting = "네! 가격 정보를 알려드리겠습니다."
-                elif "추천" in last_user_message or "순위" in last_user_message:
-                    greeting = "네! 조건에 맞춰 추천해드리겠습니다."
-                elif "선택" in last_user_message or "골라" in last_user_message:
-                    greeting = "네! 최적의 선택을 도와드리겠습니다."
-                elif "차이" in last_user_message or "비교" in last_user_message:
-                    greeting = "네! 비교 분석해드리겠습니다."
-                elif "왜" in last_user_message or "이유" in last_user_message:
-                    greeting = "네! 이유를 설명해드리겠습니다."
-                elif is_followup:
-                    greeting = "네! 조건에 맞춰 분석해드리겠습니다."
-                
-                print(f"✅ [캐시 처리] 멘트 생성 완료: '{greeting}'")
+                try:
+                    greeting_model = configurable_model.with_config(greeting_model_config)
+                    greeting_response = await greeting_model.ainvoke([HumanMessage(content=greeting_prompt)])
+                    greeting = str(greeting_response.content).strip()
+                    
+                    # 불필요한 따옴표나 태그 제거
+                    greeting = greeting.strip('"\'`').strip()
+                    
+                    # "안녕하세요"로만 시작하는 너무 짧은 응답 감지
+                    if greeting.startswith("안녕하세요") and len(greeting) < 15:
+                        print(f"⚠️ [캐시 처리] LLM 응답이 너무 짧음: '{greeting}', 재시도")
+                        greeting = ""  # 재시도하도록 빈 문자열로 설정
+                    
+                    # 응답이 너무 길면 적절히 자르기 (100자 이내로)
+                    if greeting and len(greeting) > 100:
+                        # 문장 단위로 자르기 (마침표나 느낌표 기준)
+                        sentences = re.split(r'[.!?。]', greeting)
+                        if len(sentences) > 1 and sentences[0]:
+                            # 첫 번째 문장만 사용하고 마침표 추가
+                            greeting = sentences[0].strip() + '.'
+                        else:
+                            # 문장 구분이 없으면 100자로 자르기
+                            greeting = greeting[:100].strip()
+                    
+                    # 빈 응답이거나 너무 짧으면 재시도 (최소 30자 이상)
+                    if not greeting or len(greeting) < 30:
+                        print(f"⚠️ [캐시 처리] LLM 응답이 너무 짧음 ({len(greeting) if greeting else 0}자), 재시도")
+                        # 더 상세한 프롬프트로 재시도 (final_report_generation 스타일)
+                        retry_prompt = f"""당신은 코딩 AI 도구 추천 전문가입니다.
+
+사용자 메시지:
+{messages_context}
+
+위 질문에 맞는 자연스럽고 상세한 인사 멘트를 생성하세요. 질문의 핵심 내용(팀 규모, 목적, 요구사항 등)을 구체적으로 반영한 40-100자 정도의 상세한 인사 멘트를 작성해주세요.
+
+예시: "네! 백엔드와 프론트엔드를 포함한 8명 규모의 개발팀에 적합한 AI 도구들을 분석해드리겠습니다. 팀의 코드 작성 및 리뷰 효율성 향상에 도움이 되는 도구를 비교해드리겠습니다."
+
+인사 멘트만 출력하세요:"""
+                        retry_response = await greeting_model.ainvoke([HumanMessage(content=retry_prompt)])
+                        greeting = str(retry_response.content).strip().strip('"\'`').strip()
+                        
+                        # 재시도 후에도 너무 짧으면 질문 기반으로 동적 생성
+                        if not greeting or len(greeting) < 30:
+                            # 질문의 핵심 키워드를 추출해서 동적으로 생성
+                            keywords = []
+                            if "팀" in last_user_message or "규모" in last_user_message:
+                                keywords.append("팀")
+                            if "코드" in last_user_message or "리뷰" in last_user_message:
+                                keywords.append("코드 작성 및 리뷰")
+                            if "도구" in last_user_message or "추천" in last_user_message:
+                                keywords.append("도구 추천")
+                            
+                            if keywords:
+                                greeting = f"네! {'와 '.join(keywords[:2])}에 적합한 AI 도구를 분석해드리겠습니다."
+                            else:
+                                greeting = f"네! {last_user_message[:30]}에 대해 조사해드리겠습니다."
+                    
+                    print(f"✅ [캐시 처리] LLM으로 인사 멘트 생성 완료: '{greeting}' (길이: {len(greeting)}자)")
+                except Exception as e:
+                    print(f"⚠️ [캐시 처리] LLM 인사 멘트 생성 실패: {e}, 질문 기반 동적 생성")
+                    # LLM 실패 시 질문 내용을 기반으로 동적으로 생성 (하드코딩 최소화)
+                    question_preview = last_user_message[:50] if len(last_user_message) > 50 else last_user_message
+                    greeting = f"네! {question_preview}에 대해 조사해드리겠습니다."
+                    print(f"✅ [캐시 처리] 동적 생성 인사 멘트: '{greeting}'")
+                print(f"✅ [캐시 처리] 리포트 본문 길이: {len(report_body)}자, 시작 100자: {report_body[:100]}")
                 
                 return Command(
                     goto="__end__",
