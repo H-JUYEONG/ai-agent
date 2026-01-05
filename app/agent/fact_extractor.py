@@ -19,13 +19,27 @@ fact_extraction_prompt = """당신은 연구 결과에서 구조화된 사실을
 **추출할 정보:**
 1. **도구명** (name)
 2. **가격 플랜** (pricing_plans):
-   - 플랜명 (name)
-   - 사용자당 월 가격 (price_per_user_per_month, USD)
-   - 월 가격 (price_per_month, USD, 개인용)
-   - 플랜 타입 (plan_type: "individual", "team", "enterprise")
-   - 출처 URL (source_url)
+   - 🚨 **중요**: 개인용 플랜과 팀용 플랜을 반드시 구분하여 추출하세요!
+   - 플랜명 (name): Findings에서 확인한 실제 플랜명 사용 (예: "Free", "Pro", "Business", "Team", "Enterprise" 등)
+   - **개인용 플랜** (plan_type: "individual"):
+     * price_per_month: 개인 사용자 월 가격 (USD)
+     * price_per_user_per_month: null
+   - **팀용 플랜** (plan_type: "team" 또는 "enterprise"):
+     * price_per_user_per_month: 사용자당 월 가격 (USD) - 필수!
+     * price_per_month: null 또는 전체 팀 월 가격 (USD)
+   - 플랜 타입 (plan_type): "individual" (개인용), "team" (팀용), "enterprise" (엔터프라이즈)
+   - 출처 URL (source_url): 가격 정보 출처
+   - 🚨 **예시**:
+     * 개인용: "Pro 플랜: $10/월" → plan_type: "individual", price_per_month: 10
+     * 팀용: "Team 플랜: 사용자당 $19/월" → plan_type: "team", price_per_user_per_month: 19
+     * 엔터프라이즈: "Enterprise: 사용자당 $25/월" → plan_type: "enterprise", price_per_user_per_month: 25
 3. **통합 기능** (integrations): ⚠️ 예시: GitHub, GitLab, Slack, Jira 등은 참고용일 뿐, 실제 통합 서비스는 Findings에서 확인한 값 사용
 4. **지원 언어** (supported_languages): ⚠️ 예시: Python, JavaScript, Java 등은 참고용일 뿐, 실제 지원 언어는 Findings에서 확인한 값 사용
+   - 🚨 **중요**: 프레임워크나 런타임이 언급되면 해당 언어도 포함하세요!
+     * 예: "Node.js 지원" → JavaScript 포함
+     * 예: "React 지원" → JavaScript, TypeScript 포함
+     * 예: "Spring Boot 지원" → Java 포함
+     * 이는 일반적인 기술 지식이므로 Findings에 명시되지 않아도 포함하세요!
 5. **보안 정책** (security_policy): "opt-in", "opt-out", "on-premise", "no-transmission"
 6. **보안 상세** (security_details): 보안 정책 설명
 7. **업무 지원** (workflow_support): "code_completion", "code_generation", "code_review", "refactoring", "debugging"

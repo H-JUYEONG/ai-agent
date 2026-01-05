@@ -1060,16 +1060,14 @@ async def compress_research(state: ResearcherState, config: RunnableConfig):
         }
 
 
-async def final_report_generation(state: AgentState, config: RunnableConfig):
-    """최종 리포트 생성 + Redis 캐싱"""
+async def run_decision_engine(state: AgentState, config: RunnableConfig):
+    """Decision Engine 실행 (의사결정 질문인 경우)"""
     
-    configurable = Configuration.from_runnable_config(config)
+    # 사실 추출 (Findings에서 구조화된 사실 추출)
     notes = state.get("notes", [])
     findings = "\n\n".join(notes)
-    domain = state.get("domain", "AI 서비스")
-    
-    # 🆕 사실 추출 (Findings에서 구조화된 사실 추출)
     tool_facts = state.get("tool_facts", [])
+    
     if not tool_facts and findings and len(findings) > 100:
         print("🔍 [Fact Extractor] Findings에서 도구 사실 추출 시작")
         try:
@@ -1080,6 +1078,152 @@ async def final_report_generation(state: AgentState, config: RunnableConfig):
                 state["tool_facts"] = tool_facts
         except Exception as e:
             print(f"⚠️ [Fact Extractor] 오류: {e}")
+    
+    # Decision Engine 실행 여부 확인
+    question_type = state.get("question_type", "comparison")
+    messages_list = state.get("messages", [])
+    last_user_message = str(messages_list[-1].content).lower() if messages_list else ""
+    
+    is_decision_question = (
+        question_type in ["decision", "comparison"] or
+        any(keyword in last_user_message for keyword in [
+            "중 하나만", "하나만", "선택", "어떤 것이", "맞을까", "추천", "어떤 도구", 
+            "좋을까", "적합", "최적화", "어떤게", "뭘", "무엇을", "어떤게 좋", "어떤 것이 좋",
+            "비교", "vs", "대비", "차이", "어떤게 나은", "더 좋은", "어느게", "최적"
+        ]) or
+        "어떤 도구가 좋을까요" in last_user_message or
+        ("어떤 도구" in last_user_message and "좋" in last_user_message) or
+        ("vs" in last_user_message or "대비" in last_user_message) or
+        ("최적화" in last_user_message and "도구" in last_user_message)  # 🆕 "최적화된 도구" 패턴
+    )
+    
+    print(f"🔍 [Decision Engine DEBUG] is_decision_question: {is_decision_question}, tool_facts: {len(tool_facts) if tool_facts else 0}개")
+    print(f"🔍 [Decision Engine DEBUG] findings 길이: {len(findings) if findings else 0}자")
+    
+    # 🚨 Decision 질문인데 tool_facts가 없으면 Findings에서 다시 추출 시도
+    if is_decision_question and not tool_facts:
+        if findings and len(findings) > 100:
+            print("🔍 [Decision Engine] tool_facts 없음 - Findings에서 재추출 시도")
+            try:
+                extracted_facts = await extract_tool_facts(findings, config)
+                if extracted_facts:
+                    tool_facts = [fact.model_dump() for fact in extracted_facts]
+                    print(f"✅ [Decision Engine] 재추출 성공: {len(tool_facts)}개 도구 사실")
+                    state["tool_facts"] = tool_facts
+                else:
+                    print(f"⚠️ [Decision Engine] tool_facts 추출 실패 - Findings에서 도구 정보를 찾을 수 없음")
+            except Exception as e:
+                print(f"⚠️ [Decision Engine] tool_facts 추출 오류: {e}")
+                import traceback
+                traceback.print_exc()
+        else:
+            print(f"⚠️ [Decision Engine] findings가 부족함 ({len(findings) if findings else 0}자)")
+    
+    if not is_decision_question:
+        # Decision 질문이 아니면 Decision Engine 실행 안 함
+        return {}
+    
+    if not tool_facts:
+        # Decision 질문인데 tool_facts가 없으면 Decision Engine 실행 불가
+        print(f"🚨 [Decision Engine] Decision 질문이지만 tool_facts 없음 - Decision Engine 실행 불가")
+        # 🚨 중요: tool_facts가 없으면 decision_result도 없으므로 route_after_research에서 cannot_answer로 감
+        # 하지만 사용자가 일반 리포트를 원할 수 있으므로, 빈 dict 반환하여 route_after_research에서 처리하도록 함
+        return {}
+    
+    # Decision Engine 실행
+    try:
+        constraints = state.get("constraints", {})
+        tech_stack = constraints.get("must_support_language", []) if constraints else []
+        
+        if not tech_stack and messages_list:
+            last_user_msg = str(messages_list[-1].content).lower()
+            # 백엔드/프론트엔드 키워드에서 스택 추출
+            if "백엔드" in last_user_msg or "backend" in last_user_msg:
+                if "java" not in tech_stack:
+                    tech_stack.append("Java")
+            if "프론트엔드" in last_user_msg or "frontend" in last_user_msg or "프론트" in last_user_msg:
+                if "javascript" not in tech_stack:
+                    tech_stack.append("JavaScript")
+                if "typescript" not in tech_stack:
+                    tech_stack.append("TypeScript")
+            
+            # 일반적인 프로그래밍 언어 키워드 매칭
+            language_keywords = [
+                "python", "java", "javascript", "typescript", "go", "rust", 
+                "c++", "c#", "php", "ruby", "swift", "kotlin", "scala"
+            ]
+            for lang_keyword in language_keywords:
+                if lang_keyword in last_user_msg:
+                    lang_name = lang_keyword.capitalize()
+                    if lang_name == "C++":
+                        lang_name = "C++"
+                    elif lang_name == "C#":
+                        lang_name = "C#"
+                    if lang_name not in tech_stack:
+                        tech_stack.append(lang_name)
+        
+        # workflow_focus 추출
+        workflow_focus = []
+        if messages_list:
+            last_user_msg = str(messages_list[-1].content).lower()
+            if any(keyword in last_user_msg for keyword in [
+                "pr 리뷰", "pull request 리뷰", "코드 리뷰", "리뷰 지원", 
+                "리뷰까지", "리뷰 기능", "pr 분석", "pr 자동"
+            ]):
+                workflow_focus.append(WorkflowType.CODE_REVIEW)
+            if any(keyword in last_user_msg for keyword in [
+                "코드 작성", "코드 생성", "자동완성", "코드 완성"
+            ]):
+                workflow_focus.append(WorkflowType.CODE_GENERATION)
+            if "리팩토링" in last_user_msg:
+                workflow_focus.append(WorkflowType.REFACTORING)
+            if "디버깅" in last_user_msg:
+                workflow_focus.append(WorkflowType.DEBUGGING)
+            if not workflow_focus:
+                workflow_focus.append(WorkflowType.CODE_COMPLETION)
+        
+        # UserContext 생성
+        current_team_size = None
+        if messages_list:
+            last_user_msg = str(messages_list[-1].content).lower()
+            team_size_match = re.search(r'(\d+)\s*명', last_user_msg)
+            if team_size_match:
+                current_team_size = int(team_size_match.group(1))
+        
+        user_context = UserContext(
+            team_size=current_team_size,
+            tech_stack=tech_stack,
+            budget_max=constraints.get("budget_max") if constraints else None,
+            security_required=constraints.get("security_required", False) if constraints else False,
+            required_integrations=[],
+            workflow_focus=workflow_focus,
+            excluded_tools=constraints.get("excluded_tools", []) if constraints else []
+        )
+        
+        # Decision Engine 실행
+        tools = [ToolFact(**fact) for fact in tool_facts]
+        engine = DecisionEngine(user_context)
+        decision_result = engine.make_decision(tools)
+        
+        print(f"✅ [Decision Engine] 실행 완료: 추천 {len(decision_result.recommended_tools)}개, 제외 {len(decision_result.excluded_tools)}개")
+        
+        return {
+            "decision_result": decision_result.model_dump()
+        }
+    except Exception as e:
+        print(f"⚠️ [Decision Engine] 오류: {e}")
+        import traceback
+        traceback.print_exc()
+        return {}
+
+
+async def final_report_generation(state: AgentState, config: RunnableConfig):
+    """최종 리포트 생성 + Redis 캐싱 (일반 리포트, LLM 사용)"""
+    
+    configurable = Configuration.from_runnable_config(config)
+    notes = state.get("notes", [])
+    findings = "\n\n".join(notes)
+    domain = state.get("domain", "AI 서비스")
     
     # Messages 가져오기 및 Follow-up 판단
     messages_list = state.get("messages", [])
@@ -1218,162 +1362,66 @@ async def final_report_generation(state: AgentState, config: RunnableConfig):
     else:
         constraints_text = "제약 조건 없음"
     
-    # Decision Engine 사용 (의사결정 질문인 경우 - 더 넓은 범위로 감지)
+    # 🚨 Decision Engine은 run_decision_engine 노드에서 실행되므로 여기서는 실행하지 않음
+    # Decision Engine 결과가 있으면 사용, 없으면 일반 리포트 생성 (Discovery 질문용)
     decision_info = ""
-    last_user_message = str(messages_list[-1].content).lower() if messages_list else ""
-    # 의사결정 질문 감지: decision/comparison 타입이거나, 선택 관련 키워드가 있거나, 추천 요청
-    is_decision_question = (
-        question_type in ["decision", "comparison"] or  # 비교 질문도 Decision Engine 사용
-        any(keyword in last_user_message for keyword in [
-            "중 하나만", "하나만", "선택", "어떤 것이", "맞을까", "추천", "어떤 도구", 
-            "좋을까", "적합", "어떤게", "뭘", "무엇을", "어떤게 좋", "어떤 것이 좋",
-            "비교", "vs", "대비", "차이", "어떤게 나은", "더 좋은", "어느게"
-        ]) or
-        "어떤 도구가 좋을까요" in last_user_message or
-        ("어떤 도구" in last_user_message and "좋" in last_user_message) or
-        ("vs" in last_user_message or "대비" in last_user_message)  # 비교 질문도 포함
-    )
+    decision_result = state.get("decision_result")
     
-    if is_decision_question:
+    if decision_result:
+        # Decision Engine 결과가 있으면 decision_info 생성 (structured_report_generation에서 사용)
+        from app.agent.models import DecisionResult
         try:
-            # 사용자 메시지에서 tech_stack 추출
-            tech_stack = constraints.get("must_support_language", []) if constraints else []
-            if not tech_stack and messages_list:
-                last_user_msg = str(messages_list[-1].content).lower()
-                
-                # 🆕 백엔드/프론트엔드 키워드에서 스택 추출
-                if "백엔드" in last_user_msg or "backend" in last_user_msg:
-                    # 백엔드 일반적 스택
-                    if "java" not in tech_stack:
-                        tech_stack.append("Java")
-                    if "spring" in last_user_msg or "spring boot" in last_user_msg:
-                        # Spring Boot는 Java 기반이므로 이미 추가됨
-                        pass
-                
-                if "프론트엔드" in last_user_msg or "frontend" in last_user_msg or "프론트" in last_user_msg:
-                    # 프론트엔드 일반적 스택
-                    if "javascript" not in tech_stack:
-                        tech_stack.append("JavaScript")
-                    if "typescript" not in tech_stack:
-                        tech_stack.append("TypeScript")
-                    if "react" in last_user_msg:
-                        # React는 TypeScript/JavaScript 기반이므로 이미 추가됨
-                        pass
-                
-                # 일반적인 프로그래밍 언어 키워드 매칭
-                language_keywords = [
-                    "python", "java", "javascript", "typescript", "go", "rust", 
-                    "c++", "c#", "php", "ruby", "swift", "kotlin", "scala"
-                ]
-                for lang_keyword in language_keywords:
-                    if lang_keyword in last_user_msg:
-                        # 첫 글자 대문자로 변환
-                        lang_name = lang_keyword.capitalize()
-                        if lang_name == "C++":
-                            lang_name = "C++"
-                        elif lang_name == "C#":
-                            lang_name = "C#"
-                        if lang_name not in tech_stack:
-                            tech_stack.append(lang_name)
+            result = DecisionResult(**decision_result)
+            constraints_dict = state.get("constraints", {})
+            team_size = constraints_dict.get("team_size") if constraints_dict else None
+            tech_stack = constraints_dict.get("must_support_language", []) if constraints_dict else []
             
-            # workflow_focus 추출 (더 정확하게)
-            workflow_focus = []
-            if messages_list:
-                last_user_msg = str(messages_list[-1].content).lower()
-                # PR 리뷰 관련 키워드 (우선순위 높음)
-                if any(keyword in last_user_msg for keyword in [
-                    "pr 리뷰", "pull request 리뷰", "코드 리뷰", "리뷰 지원", 
-                    "리뷰까지", "리뷰 기능", "pr 분석", "pr 자동"
-                ]):
-                    workflow_focus.append(WorkflowType.CODE_REVIEW)
-                # 코드 작성 관련
-                if any(keyword in last_user_msg for keyword in [
-                    "코드 작성", "코드 생성", "자동완성", "코드 완성"
-                ]):
-                    workflow_focus.append(WorkflowType.CODE_GENERATION)
-                # 리팩토링
-                if "리팩토링" in last_user_msg:
-                    workflow_focus.append(WorkflowType.REFACTORING)
-                # 디버깅
-                if "디버깅" in last_user_msg:
-                    workflow_focus.append(WorkflowType.DEBUGGING)
-                # 기본값: workflow_focus가 없으면 코드 작성
-                if not workflow_focus:
-                    workflow_focus.append(WorkflowType.CODE_COMPLETION)
-            
-            # UserContext 생성
-            # 🆕 제약 조건(팀 규모, 예산 등)은 현재 메시지에서만 추출 (이전 대화의 제약 조건은 사용 안 함)
-            current_team_size = None
-            if messages_list:
-                last_user_msg = str(messages_list[-1].content).lower()
-                # 현재 메시지에서 팀 규모 추출
-                team_size_match = re.search(r'(\d+)\s*명', last_user_msg)
-                if team_size_match:
-                    current_team_size = int(team_size_match.group(1))
-            
-            # 제약 조건은 현재 메시지에서 추출한 값만 사용 (이전 대화의 제약 조건 무시)
-            # 단, 이전에 추천한 도구나 언급한 정보는 참조 가능 (이건 constraints가 아니라 previous_tools로 처리)
-            team_size = current_team_size  # 현재 메시지에서만 추출
-            
-            user_context = UserContext(
-                team_size=team_size,  # 현재 메시지에서 추출한 값 우선
-                tech_stack=tech_stack,
-                budget_max=constraints.get("budget_max") if constraints else None,
-                security_required=constraints.get("security_required", False) if constraints else False,
-                required_integrations=[],  # TODO: 사용자 메시지에서 추출
-                workflow_focus=workflow_focus,
-                excluded_tools=constraints.get("excluded_tools", []) if constraints else []
-            )
-            
-            # Decision Engine 실행 (도구 사실이 있을 때만)
+            # 비용 분석
+            cost_analysis = ""
             tool_facts = state.get("tool_facts", [])
-            if tool_facts:
-                tools = [ToolFact(**fact) for fact in tool_facts]
-                engine = DecisionEngine(user_context)
-                decision_result = engine.make_decision(tools)
-                
-                # 정량적 분석: 비용 계산
-                cost_analysis = ""
-                if user_context.team_size:
-                    for tool in tools:
-                        tool_name = tool.name
-                        team_plans = [p for p in tool.pricing_plans if p.plan_type in ["team", "business", "enterprise"]]
+            if team_size and tool_facts:
+                for tool_fact_dict in tool_facts:
+                    tool_name = tool_fact_dict.get("name", "")
+                    if tool_name in result.recommended_tools[:3]:
+                        pricing_plans = tool_fact_dict.get("pricing_plans", [])
+                        team_plans = [p for p in pricing_plans if p.get("plan_type") in ["team", "business", "enterprise"]]
                         if team_plans:
-                            cheapest_plan = min(team_plans, key=lambda p: p.price_per_user_per_month or float('inf'))
-                            if cheapest_plan.price_per_user_per_month:
-                                monthly_cost = cheapest_plan.price_per_user_per_month * user_context.team_size
+                            cheapest_plan = min(team_plans, key=lambda p: p.get("price_per_user_per_month") or float('inf'))
+                            if cheapest_plan.get("price_per_user_per_month"):
+                                monthly_cost = cheapest_plan["price_per_user_per_month"] * team_size
                                 annual_cost = monthly_cost * 12
-                                cost_analysis += f"- {tool_name}: ${monthly_cost:.0f}/월 (${annual_cost:.0f}/년, {user_context.team_size}명 기준)\n"
-                
-                # 상세 점수 분석
-                detailed_scores = ""
-                for score in decision_result.tool_scores:
-                    tool_name = score.tool_name
-                    detailed_scores += f"\n**{tool_name}** (총점: {score.total_score:.2f}):\n"
-                    detailed_scores += f"  - 언어 지원: {score.language_support_score:.2f}\n"
-                    detailed_scores += f"  - 통합 기능: {score.integration_score:.2f}\n"
-                    detailed_scores += f"  - 업무 적합성: {score.workflow_fit_score:.2f}\n"
-                    detailed_scores += f"  - 가격: {score.price_score:.2f}\n"
-                    detailed_scores += f"  - 보안: {score.security_score:.2f}\n"
-                
-                decision_info = f"""
+                                cost_analysis += f"- {tool_name}: ${monthly_cost:.0f}/월 (${annual_cost:.0f}/년, {team_size}명 기준)\n"
+            
+            # 상세 점수 분석
+            detailed_scores = ""
+            for score_dict in result.tool_scores:
+                tool_name = score_dict.get("tool_name", "")
+                total_score = score_dict.get("total_score", 0)
+                detailed_scores += f"\n**{tool_name}** (총점: {total_score:.2f}):\n"
+                detailed_scores += f"  - 언어 지원: {score_dict.get('language_support_score', 0):.2f}\n"
+                detailed_scores += f"  - 통합 기능: {score_dict.get('integration_score', 0):.2f}\n"
+                detailed_scores += f"  - 업무 적합성: {score_dict.get('workflow_fit_score', 0):.2f}\n"
+                detailed_scores += f"  - 가격: {score_dict.get('price_score', 0):.2f}\n"
+                detailed_scores += f"  - 보안: {score_dict.get('security_score', 0):.2f}\n"
+            
+            decision_info = f"""
 
 **🚨🚨🚨 Decision Engine 분석 결과 (반드시 이 결과를 기반으로 답변하세요!) 🚨🚨🚨**
 
 **📊 최종 추천 도구 (점수 순):**
-{chr(10).join(f"{i+1}. **{tool}** (총점: {next(s.total_score for s in decision_result.tool_scores if s.tool_name == tool):.2f}/1.0)" for i, tool in enumerate(decision_result.recommended_tools[:3]))}
+{chr(10).join(f"{i+1}. **{tool}** (총점: {next(s.get('total_score', 0) for s in result.tool_scores if s.get('tool_name') == tool):.2f}/1.0)" for i, tool in enumerate(result.recommended_tools[:3]))}
 
 **❌ 제외된 도구:**
-{', '.join(decision_result.excluded_tools) if decision_result.excluded_tools else "없음"}
+{', '.join(result.excluded_tools) if result.excluded_tools else "없음"}
 
-**💰 정량적 비용 분석 ({user_context.team_size}명 팀 기준):** (팀 규모가 명시된 경우만 표시)
+**💰 정량적 비용 분석 ({team_size}명 팀 기준):** (팀 규모가 명시된 경우만 표시)
 {cost_analysis if cost_analysis else "비용 정보 없음"}
 
 **📈 상세 점수 분석:**
 {detailed_scores}
 
 **🎯 판단 이유:**
-{chr(10).join(f"- **{tool}**: {reason}" for tool, reason in decision_result.reasoning.items())}
+{chr(10).join(f"- **{tool}**: {reason}" for tool, reason in result.reasoning.items())}
 
 **⚠️⚠️⚠️ 매우 중요: 반드시 위 Decision Engine 결과를 기반으로 답변하세요! ⚠️⚠️⚠️**
 1. **추천 도구는 위 순서대로만** 언급하세요. 다른 순서로 나열하지 마세요.
@@ -1381,14 +1429,11 @@ async def final_report_generation(state: AgentState, config: RunnableConfig):
 3. **정량적 비용 분석을 반드시 포함**하세요. 위에 계산된 비용을 그대로 사용하세요.
 4. **점수 기반 판단 이유를 명확히 제시**하세요. "점수가 높아서"가 아니라 구체적인 이유를 설명하세요.
 5. **명확한 하나의 결론을 제시**하세요. "둘 다 좋습니다" 같은 중립적 답변은 절대 금지입니다.
-6. **사용자 스택({', '.join(user_context.tech_stack) if user_context.tech_stack else '전체'}){'과 팀 규모(' + str(user_context.team_size) + '명)' if user_context.team_size else ''}를 기준으로** 판단 이유를 설명하세요. (팀 규모가 명시되지 않았으면 팀 규모 언급 생략)
+6. **사용자 스택({', '.join(tech_stack) if tech_stack else '전체'}){'과 팀 규모(' + str(team_size) + '명)' if team_size else ''}를 기준으로** 판단 이유를 설명하세요. (팀 규모가 명시되지 않았으면 팀 규모 언급 생략)
 
 """
-                # State에 저장
-                state["decision_result"] = decision_result.model_dump()
-                print(f"✅ [Decision Engine] 실행 완료: 추천 {len(decision_result.recommended_tools)}개, 제외 {len(decision_result.excluded_tools)}개")
         except Exception as e:
-            print(f"⚠️ [Decision Engine] 오류: {e}")
+            print(f"⚠️ [Final Report] DecisionResult 파싱 실패: {e}")
             decision_info = ""
     
     final_prompt = final_report_generation_prompt.format(
@@ -1556,6 +1601,223 @@ async def final_report_generation(state: AgentState, config: RunnableConfig):
             ],
             "notes": {"type": "override", "value": []}
         }
+
+
+async def structured_report_generation(state: AgentState, config: RunnableConfig):
+    """구조화된 리포트 생성 (Decision Engine 결과 기반, 템플릿 사용, LLM 최소화)"""
+    
+    from app.agent.models import DecisionResult
+    
+    decision_result_dict = state.get("decision_result")
+    if not decision_result_dict:
+        # Decision Engine 결과가 없으면 일반 리포트 생성으로 폴백
+        return await final_report_generation(state, config)
+    
+    try:
+        decision_result = DecisionResult(**decision_result_dict)
+    except Exception as e:
+        print(f"⚠️ [Structured Report] DecisionResult 파싱 실패: {e}, 일반 리포트 생성으로 폴백")
+        return await final_report_generation(state, config)
+    
+    messages_list = state.get("messages", [])
+    human_messages = [msg for msg in messages_list if isinstance(msg, HumanMessage)]
+    question_number = len(human_messages)
+    is_followup = question_number > 1
+    
+    # 사용자 맥락 정보
+    constraints = state.get("constraints", {})
+    tech_stack = constraints.get("must_support_language", []) if constraints else []
+    team_size = constraints.get("team_size") if constraints else None
+    
+    # 인사 멘트 생성 (간단하게)
+    last_user_message = str(messages_list[-1].content) if messages_list else ""
+    greeting = "네! 조건에 맞춰 분석해드리겠습니다." if is_followup else "네! 조사해드리겠습니다."
+    
+    # 구조화된 리포트 생성 (템플릿 기반)
+    report_parts = []
+    
+    # 1. 추천 도구 섹션
+    if decision_result.recommended_tools:
+        report_parts.append("## 💡 맞춤 추천\n")
+        for i, tool_name in enumerate(decision_result.recommended_tools[:3], 1):
+            score = next((s for s in decision_result.tool_scores if s.tool_name == tool_name), None)
+            if score:
+                report_parts.append(f"### {i}. {tool_name} (총점: {score.total_score:.2f}/1.0)\n")
+                
+                # 점수 기반 이유
+                reasons = []
+                if score.language_support_score >= 0.8:
+                    reasons.append(f"언어 지원 점수 {score.language_support_score:.2f}")
+                if score.workflow_fit_score >= 0.8:
+                    reasons.append(f"업무 적합성 점수 {score.workflow_fit_score:.2f}")
+                if score.integration_score >= 0.8:
+                    reasons.append(f"통합 기능 점수 {score.integration_score:.2f}")
+                if score.price_score >= 0.7:
+                    reasons.append(f"가격 효율성 점수 {score.price_score:.2f}")
+                
+                if reasons:
+                    report_parts.append(f"**추천 이유**: {', '.join(reasons)}\n")
+                
+                # 판단 이유 추가
+                if tool_name in decision_result.reasoning:
+                    report_parts.append(f"**상세 분석**: {decision_result.reasoning[tool_name]}\n")
+                
+                report_parts.append("\n")
+    
+    # 2. 제외된 도구 섹션
+    if decision_result.excluded_tools:
+        report_parts.append("## ❌ 제외된 도구\n")
+        for tool_name in decision_result.excluded_tools:
+            score = next((s for s in decision_result.tool_scores if s.tool_name == tool_name), None)
+            if score and score.exclusion_reason:
+                report_parts.append(f"- **{tool_name}**: {score.exclusion_reason}\n")
+        report_parts.append("\n")
+    
+    # 3. 비용 분석 (팀 규모가 있을 때만)
+    if team_size:
+        report_parts.append(f"## 💰 비용 분석 ({team_size}명 팀 기준)\n")
+        # tool_facts에서 가격 정보 가져오기
+        tool_facts = state.get("tool_facts", [])
+        for tool_fact_dict in tool_facts:
+            tool_name = tool_fact_dict.get("name", "")
+            if tool_name in decision_result.recommended_tools[:3]:
+                pricing_plans = tool_fact_dict.get("pricing_plans", [])
+                team_plans = [p for p in pricing_plans if p.get("plan_type") in ["team", "business", "enterprise"]]
+                if team_plans:
+                    cheapest_plan = min(team_plans, key=lambda p: p.get("price_per_user_per_month") or float('inf'))
+                    if cheapest_plan.get("price_per_user_per_month"):
+                        monthly_cost = cheapest_plan["price_per_user_per_month"] * team_size
+                        annual_cost = monthly_cost * 12
+                        report_parts.append(f"- **{tool_name}**: ${monthly_cost:.0f}/월 (${annual_cost:.0f}/년)\n")
+        report_parts.append("\n")
+    
+    # 4. 비교 테이블
+    if len(decision_result.recommended_tools) >= 2:
+        report_parts.append("## 📊 비교 분석\n")
+        report_parts.append("| 도구 | 총점 | 언어 지원 | 업무 적합성 | 통합 기능 | 가격 | 보안 |\n")
+        report_parts.append("|------|------|-----------|-------------|-----------|------|------|\n")
+        for tool_name in decision_result.recommended_tools[:5]:
+            score = next((s for s in decision_result.tool_scores if s.tool_name == tool_name), None)
+            if score:
+                report_parts.append(
+                    f"| {tool_name} | {score.total_score:.2f} | {score.language_support_score:.2f} | "
+                    f"{score.workflow_fit_score:.2f} | {score.integration_score:.2f} | "
+                    f"{score.price_score:.2f} | {score.security_score:.2f} |\n"
+                )
+        report_parts.append("\n")
+    
+    # 5. 최종 결론
+    if decision_result.recommended_tools:
+        top_tool = decision_result.recommended_tools[0]
+        top_score = next((s for s in decision_result.tool_scores if s.tool_name == top_tool), None)
+        report_parts.append("## 🎯 최종 결론\n")
+        if top_score:
+            report_parts.append(
+                f"**{top_tool}**을(를) 강력히 추천합니다. "
+                f"총점 {top_score.total_score:.2f}/1.0으로 가장 높은 점수를 기록했습니다."
+            )
+            if top_tool in decision_result.reasoning:
+                report_parts.append(f" {decision_result.reasoning[top_tool]}")
+        report_parts.append("\n")
+    
+    report_body = "".join(report_parts)
+    
+    # 캐시 저장 (기존 로직과 동일)
+    normalized_query = state.get("normalized_query", {})
+    domain = state.get("domain", "AI 서비스")
+    if normalized_query and normalized_query.get("cache_key"):
+        cache_key = normalized_query["cache_key"]
+        research_cache.set(
+            cache_key,
+            {"content": report_body},
+            domain=domain,
+            prefix="final"
+        )
+        print(f"✅ [캐시 저장] 구조화된 리포트 저장 완료")
+    
+    return {
+        "final_report": report_body,
+        "messages": [
+            AIMessage(content=greeting),
+            AIMessage(content=report_body)
+        ],
+        "notes": {"type": "override", "value": []}
+    }
+
+
+async def cannot_answer(state: AgentState, config: RunnableConfig):
+    """Decision Engine 결과 없을 때 답변 불가 메시지"""
+    
+    messages_list = state.get("messages", [])
+    human_messages = [msg for msg in messages_list if isinstance(msg, HumanMessage)]
+    question_number = len(human_messages)
+    is_followup = question_number > 1
+    
+    greeting = "네! 조건에 맞춰 분석해드리겠습니다." if is_followup else "네! 조사해드리겠습니다."
+    error_message = "Decision Engine 분석 결과가 없어 답변할 수 없습니다. 도구 정보가 부족하거나 질문이 명확하지 않을 수 있습니다."
+    
+    return {
+        "final_report": error_message,
+        "messages": [
+            AIMessage(content=greeting),
+            AIMessage(content=error_message)
+        ],
+        "notes": {"type": "override", "value": []}
+    }
+
+
+def route_after_research(state: AgentState) -> Literal["structured_report_generation", "final_report_generation", "cannot_answer"]:
+    """연구 완료 후 라우팅: Decision Engine 결과 유무에 따라 분기"""
+    
+    # Decision Engine이 실행되어야 하는 질문인지 확인
+    question_type = state.get("question_type", "comparison")
+    messages_list = state.get("messages", [])
+    last_user_message = str(messages_list[-1].content).lower() if messages_list else ""
+    
+    # 🚨 디버깅: 질문 내용과 타입 확인
+    print(f"🔍 [Routing DEBUG] question_type: {question_type}")
+    print(f"🔍 [Routing DEBUG] last_user_message: {last_user_message[:100]}")
+    
+    is_decision_question = (
+        question_type in ["decision", "comparison"] or
+        any(keyword in last_user_message for keyword in [
+            "중 하나만", "하나만", "선택", "어떤 것이", "맞을까", "추천", "어떤 도구", 
+            "좋을까", "적합", "최적화", "어떤게", "뭘", "무엇을", "어떤게 좋", "어떤 것이 좋",
+            "비교", "vs", "대비", "차이", "어떤게 나은", "더 좋은", "어느게", "최적"
+        ]) or
+        "어떤 도구가 좋을까요" in last_user_message or
+        ("어떤 도구" in last_user_message and "좋" in last_user_message) or
+        ("vs" in last_user_message or "대비" in last_user_message) or
+        ("최적화" in last_user_message and "도구" in last_user_message)  # 🆕 "최적화된 도구" 패턴
+    )
+    
+    # 🚨 디버깅: Decision 질문 판정 결과
+    print(f"🔍 [Routing DEBUG] is_decision_question: {is_decision_question}")
+    
+    # Decision Engine 결과 확인
+    decision_result = state.get("decision_result")
+    tool_facts = state.get("tool_facts", [])
+    
+    # 🚨 디버깅: Decision Engine 결과 확인
+    print(f"🔍 [Routing DEBUG] decision_result 존재: {decision_result is not None}")
+    print(f"🔍 [Routing DEBUG] tool_facts 개수: {len(tool_facts) if tool_facts else 0}")
+    
+    if is_decision_question:
+        # 🚨 Decision 질문인 경우: Decision Engine 결과가 있어야만 답변 가능
+        if decision_result and tool_facts:
+            # Decision Engine 결과가 있으면 구조화된 리포트 생성
+            print(f"✅ [Routing] Decision 질문 + Decision Engine 결과 있음 → structured_report_generation")
+            return "structured_report_generation"
+        else:
+            # Decision Engine 결과가 없으면 일반 리포트 생성으로 폴백 (사용자 경험 개선)
+            print(f"⚠️ [Routing] Decision 질문이지만 Decision Engine 결과 없음 → final_report_generation (폴백)")
+            print(f"⚠️ [Routing DEBUG] decision_result: {decision_result}, tool_facts: {len(tool_facts) if tool_facts else 0}개")
+            # 🚨 중요: Decision Engine 결과가 없어도 일반 리포트는 생성 가능 (Findings 기반)
+            return "final_report_generation"
+    else:
+        # Discovery 질문인 경우: 일반 리포트 생성 (Decision Engine 불필요)
+        print(f"✅ [Routing] Discovery 질문 → final_report_generation")
+        return "final_report_generation"
 
 
 
