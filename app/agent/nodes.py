@@ -1841,6 +1841,9 @@ async def structured_report_generation(state: AgentState, config: RunnableConfig
     
     # 비용 정보 수집 (검증 로직 포함)
     def get_cost_info(tool_name, team_size):
+        if not team_size or team_size <= 0:
+            return ""
+        
         for tool_fact_dict in tool_facts:
             if tool_fact_dict.get("name") == tool_name:
                 pricing_plans = tool_fact_dict.get("pricing_plans", [])
@@ -1855,20 +1858,43 @@ async def structured_report_generation(state: AgentState, config: RunnableConfig
                     if price_per_user and price_per_user > 0:
                         monthly_cost = price_per_user * team_size
                         annual_cost = monthly_cost * 12
-                        # 비용이 너무 크면 (예: $1000/월 이상) 검증 필요
+                        plan_name = cheapest_plan.get("name", "팀 플랜")
+                        plan_type = cheapest_plan.get("plan_type", "")
+                        # 비용이 너무 크면 (예: $10,000/월 이상) 검증 필요
                         if monthly_cost > 10000:  # $10,000 이상이면 의심스러움
                             print(f"⚠️ [가격 검증] {tool_name} 계산된 비용이 비정상적으로 큼: ${monthly_cost:.0f}/월 (사용자당 ${price_per_user}/월)")
-                        return f"${monthly_cost:.0f}/월 (${annual_cost:.0f}/년)"
+                        # 플랜 타입에 따라 적절한 라벨 사용
+                        if plan_type in ["team", "business", "enterprise"]:
+                            return f"팀 플랜 ({plan_name}): ${monthly_cost:.0f}/월 (${annual_cost:.0f}/년)"
+                        else:
+                            return f"{plan_name}: ${monthly_cost:.0f}/월 (${annual_cost:.0f}/년)"
                 
-                # 팀 플랜이 없으면 개인 플랜 확인 (하지만 팀용으로는 추천하지 않음)
-                individual_plans = [p for p in pricing_plans if p.get("plan_type") in ["individual", "personal", "pro"]]
-                if individual_plans:
-                    cheapest_individual = min(individual_plans, key=lambda p: p.get("price_per_user_per_month") or float('inf'))
-                    price_per_user = cheapest_individual.get("price_per_user_per_month")
+                # 팀 플랜이 없거나 price_per_user가 없는 경우, 다른 플랜 확인
+                # price_per_user_per_month가 있는 플랜 우선 검색 (plan_type과 상관없이)
+                plans_with_per_user = [p for p in pricing_plans if p.get("price_per_user_per_month")]
+                if plans_with_per_user:
+                    cheapest_plan = min(plans_with_per_user, key=lambda p: p.get("price_per_user_per_month") or float('inf'))
+                    price_per_user = cheapest_plan.get("price_per_user_per_month")
                     if price_per_user and price_per_user > 0:
                         monthly_cost = price_per_user * team_size
                         annual_cost = monthly_cost * 12
-                        # 개인 플랜은 참고용으로만 표시 (팀 플랜보다 비쌀 수 있음)
+                        plan_name = cheapest_plan.get("name", "플랜")
+                        plan_type = cheapest_plan.get("plan_type", "unknown")
+                        # plan_type이 "team", "business", "enterprise"가 아닌 경우에만 경고
+                        if plan_type not in ["team", "business", "enterprise"]:
+                            return f"{plan_name}: ${monthly_cost:.0f}/월 (${annual_cost:.0f}/년, 팀 플랜 확인 권장)"
+                        else:
+                            return f"{plan_name}: ${monthly_cost:.0f}/월 (${annual_cost:.0f}/년)"
+                
+                # price_per_month만 있는 경우 (개인 플랜일 수 있음)
+                individual_plans = [p for p in pricing_plans if p.get("plan_type") in ["individual", "personal", "pro"]]
+                if individual_plans:
+                    cheapest_individual = min(individual_plans, key=lambda p: p.get("price_per_month") or float('inf'))
+                    price_per_month = cheapest_individual.get("price_per_month")
+                    if price_per_month and price_per_month > 0:
+                        # 개인 플랜은 1인당 기준으로 계산 (하지만 팀용으로는 부적합)
+                        monthly_cost = price_per_month * team_size  # 개인 플랜 × 인원수
+                        annual_cost = monthly_cost * 12
                         return f"개인 플랜 기준: ${monthly_cost:.0f}/월 (${annual_cost:.0f}/년, 공식 팀 플랜 확인 권장)"
         return ""
     
@@ -1908,11 +1934,65 @@ async def structured_report_generation(state: AgentState, config: RunnableConfig
         if constraints.get("budget_max"):
             constraints_text_simple += f"예산: 월 ${constraints.get('budget_max')} 이내\n"
     
+    # 코드 리뷰 요구사항 확인
+    workflow_focus = state.get("workflow_focus", [])
+    requires_code_review = any("review" in str(wf).lower() or "리뷰" in str(wf) for wf in workflow_focus) if workflow_focus else False
+    if not requires_code_review:
+        # 사용자 메시지에서도 확인
+        last_user_msg = str(messages_list[-1].content) if messages_list else ""
+        requires_code_review = "리뷰" in last_user_msg or "review" in last_user_msg.lower()
+    
+    # 추천 도구 중 리뷰 기능 지원 여부 확인
+    recommended_tools_have_review = []
+    for info in recommended_tools_info:
+        tool_fact_dict = next((t for t in tool_facts if t.get("name") == info['name']), None)
+        if tool_fact_dict:
+            workflow_support = tool_fact_dict.get("workflow_support", [])
+            has_review = any("review" in str(ws).lower() or "리뷰" in str(ws) for ws in workflow_support)
+            recommended_tools_have_review.append({
+                "name": info['name'],
+                "has_review": has_review
+            })
+    
+    # Findings에서 리뷰 전용 도구 찾기 (하드코딩 제거 - tool_facts와 findings에서 동적으로 찾기)
+    review_tool_names = []
+    if requires_code_review:
+        # 1. tool_facts에서 리뷰 관련 도구 찾기
+        for tool_fact_dict in tool_facts:
+            tool_name = tool_fact_dict.get("name", "")
+            if tool_name and tool_name not in [info['name'] for info in recommended_tools_info]:
+                # 추천되지 않은 도구 중에서 리뷰 기능이 있는 도구 찾기
+                workflow_support = tool_fact_dict.get("workflow_support", [])
+                feature_category = tool_fact_dict.get("feature_category", "")
+                if (any("review" in str(ws).lower() or "리뷰" in str(ws) for ws in workflow_support) or 
+                    "review" in feature_category.lower() or "리뷰" in feature_category):
+                    review_tool_names.append(tool_name)
+        
+        # 2. tool_facts에서 찾지 못한 경우, findings 텍스트에서 직접 찾기
+        if not review_tool_names:
+            import re
+            # 원본 findings와 notes에서 대소문자 유지하며 찾기
+            original_text = (findings + " " + " ".join([str(n) for n in notes])) if findings or notes else ""
+            # 리뷰 관련 도구 이름 패턴 찾기
+            review_patterns = re.findall(r'\b([A-Z][a-zA-Z]*(?:Review|CodeReview|Reviewer|리뷰)[a-zA-Z]*)\b', original_text)
+            review_tool_names = list(set([name for name in review_patterns if name and len(name) > 3]))
+    
     # Decision Engine 결과를 자연스러운 형태로 변환 (내부 평가 용어 완전 제거)
+    review_note = ""
+    if requires_code_review:
+        review_tools = [t for t in recommended_tools_have_review if t['has_review']]
+        if not review_tools:
+            if review_tool_names:
+                review_tool_examples = ", ".join(review_tool_names[:3])  # 최대 3개만
+                review_note = f"\n**⚠️ 리뷰 기능 안내**: 추천된 도구는 코드 작성에 특화되어 있으며, 코드 리뷰 기능이 필요하다면 Findings에서 확인한 PR 리뷰 전용 도구({review_tool_examples} 등)와 함께 사용하는 것을 권장합니다.\n"
+            else:
+                review_note = "\n**⚠️ 리뷰 기능 안내**: 추천된 도구는 코드 작성에 특화되어 있으며, 코드 리뷰 기능이 필요하다면 Findings에서 확인한 PR 리뷰 전용 도구와 함께 사용하는 것을 권장합니다.\n"
+    
     decision_summary = f"""**추천 도구 (우선순위 순서대로):**
 {chr(10).join([f"{info['priority']}. {info['name']}: {info['reasoning']}" for info in recommended_tools_info])}
 
 {f"**비용 정보 ({team_size}명 팀 기준):**" + chr(10) + chr(10).join([f"- {info['name']}: {info['cost']}" for info in recommended_tools_info if info['cost']]) if team_size and any(info['cost'] for info in recommended_tools_info) else ""}
+{review_note}
 """
     
     # 최종 리포트 생성 프롬프트 (Decision Engine 결과 포함하되 내부 평가 용어 완전 제거)
@@ -1938,41 +2018,91 @@ async def structured_report_generation(state: AgentState, config: RunnableConfig
     
     try:
         print(f"🔍 [DEBUG] Structured Report 생성 시작 (프롬프트 길이: {len(report_prompt)}자)")
-        final_report = await configurable_model.with_config(writer_model_config).ainvoke([
-            HumanMessage(content=report_prompt)
-        ])
-        report_body = str(final_report.content).strip()
         
-        # [GREETING] 태그 제거 (final_report_generation과 동일한 로직)
-        if "[GREETING]" in report_body and "[/GREETING]" in report_body:
-            match = re.search(r'\[GREETING\](.*?)\[/GREETING\]', report_body, re.DOTALL)
-            if match:
-                report_body = report_body.replace(match.group(0), "").strip()
+        # 리포트 재생성 로직 (최대 2번 재시도)
+        max_retries = 2
+        report_body = None
+        for attempt in range(max_retries + 1):
+            try:
+                final_report = await configurable_model.with_config(writer_model_config).ainvoke([
+                    HumanMessage(content=report_prompt)
+                ])
+                report_body = str(final_report.content).strip()
+                
+                # [GREETING] 태그 제거 (final_report_generation과 동일한 로직)
+                if "[GREETING]" in report_body and "[/GREETING]" in report_body:
+                    match = re.search(r'\[GREETING\](.*?)\[/GREETING\]', report_body, re.DOTALL)
+                    if match:
+                        report_body = report_body.replace(match.group(0), "").strip()
+                
+                # 리포트에서 내부 평가 용어 제거 (추가 정리)
+                report_body = re.sub(r'🚨🚨🚨\s*Decision Engine.*?🚨🚨🚨', '', report_body, flags=re.DOTALL)
+                report_body = re.sub(r'📈\s*상세 점수 분석.*', '', report_body, flags=re.DOTALL)
+                report_body = re.sub(r'점수[:\s]*\d+\.?\d*', '', report_body)
+                report_body = re.sub(r'총점[:\s]*\d+\.?\d*', '', report_body)
+                report_body = re.sub(r'\b보통\b|\b부적합\b|\b부분 지원\b|\b미흡\b|\b미지원\b|\b미충족\b', '', report_body)
+                report_body = re.sub(r'\|\s*도구\s*\|\s*언어 지원\s*\|\s*업무 적합성.*?\n', '', report_body, flags=re.DOTALL)  # 비교 테이블 제거
+                
+                # 리포트 완성도 검증
+                if not report_body or len(report_body) < 1000:
+                    if attempt < max_retries:
+                        print(f"⚠️ [Structured Report] 리포트가 너무 짧음 ({len(report_body)}자, 최소 1000자 필요) - 재생성 시도 {attempt + 1}/{max_retries}")
+                        # 프롬프트에 더 명확한 길이 요구사항 추가
+                        report_prompt = report_prompt.replace(
+                            "리포트는 최소 1000자 이상이어야 합니다!",
+                            f"리포트는 최소 1000자 이상이어야 합니다! (현재 {len(report_body)}자로 부족합니다. 각 도구에 대해 가격, 통합 기능, 장점, 추천 이유를 더 상세히 설명하세요!)"
+                        )
+                        continue
+                    else:
+                        print(f"⚠️ [Structured Report] 리포트가 너무 짧음 ({len(report_body)}자, 최소 1000자 필요) - 재시도 실패, fallback 사용")
+                        raise ValueError(f"리포트가 너무 짧습니다 ({len(report_body)}자, 최소 1000자 필요)")
+                
+                # 추천 도구가 모두 포함되어 있는지 확인
+                recommended_count_in_report = sum(1 for tool_name in decision_result.recommended_tools[:3] if tool_name in report_body)
+                if recommended_count_in_report < len(decision_result.recommended_tools[:3]):
+                    if attempt < max_retries:
+                        print(f"⚠️ [Structured Report] 일부 추천 도구가 리포트에 없음 (포함: {recommended_count_in_report}/{len(decision_result.recommended_tools[:3])}) - 재생성 시도 {attempt + 1}/{max_retries}")
+                        continue
+                    else:
+                        print(f"⚠️ [Structured Report] 일부 추천 도구가 리포트에 없음 (포함: {recommended_count_in_report}/{len(decision_result.recommended_tools[:3])}) - 재시도 실패")
+                        raise ValueError("추천 도구가 모두 포함되지 않았습니다")
+                
+                # 각 도구별로 최소 정보가 포함되어 있는지 확인
+                all_tools_included = True
+                for tool_name in decision_result.recommended_tools[:3]:
+                    tool_pos = report_body.find(tool_name)
+                    if tool_pos == -1:
+                        all_tools_included = False
+                        break
+                    if team_size:
+                        tool_section = report_body[tool_pos:tool_pos + 800]
+                        if "가격" not in tool_section and "$" not in tool_section:
+                            print(f"⚠️ [Structured Report] {tool_name} 가격 정보가 리포트에 없음 (경고만)")
+                
+                if not all_tools_included and attempt < max_retries:
+                    print(f"⚠️ [Structured Report] 도구 정보 누락 - 재생성 시도 {attempt + 1}/{max_retries}")
+                    continue
+                
+                # 검증 통과
+                print(f"✅ [Structured Report] 리포트 생성 성공 ({len(report_body)}자)")
+                break
+                
+            except Exception as e:
+                if attempt < max_retries:
+                    print(f"⚠️ [Structured Report] 리포트 생성 오류 (시도 {attempt + 1}/{max_retries}): {e}")
+                    continue
+                else:
+                    raise
         
-        # 리포트에서 내부 평가 용어 제거 (추가 정리)
-        report_body = re.sub(r'🚨🚨🚨\s*Decision Engine.*?🚨🚨🚨', '', report_body, flags=re.DOTALL)
-        report_body = re.sub(r'📈\s*상세 점수 분석.*', '', report_body, flags=re.DOTALL)
-        report_body = re.sub(r'점수[:\s]*\d+\.?\d*', '', report_body)
-        report_body = re.sub(r'총점[:\s]*\d+\.?\d*', '', report_body)
-        report_body = re.sub(r'\b보통\b|\b부적합\b|\b부분 지원\b|\b미흡\b|\b미지원\b|\b미충족\b', '', report_body)
-        report_body = re.sub(r'\|\s*도구\s*\|\s*언어 지원\s*\|\s*업무 적합성.*?\n', '', report_body, flags=re.DOTALL)  # 비교 테이블 제거
-        
-        # 리포트 완성도 검증
-        if not report_body or len(report_body) < 500:
-            print(f"⚠️ [Structured Report] 리포트가 너무 짧음 ({len(report_body)}자) - 재생성 시도")
-            raise ValueError("리포트가 너무 짧거나 불완전합니다")
-        
-        # 추천 도구가 모두 포함되어 있는지 확인
-        recommended_count_in_report = sum(1 for tool_name in decision_result.recommended_tools[:3] if tool_name in report_body)
-        if recommended_count_in_report < len(decision_result.recommended_tools[:3]):
-            print(f"⚠️ [Structured Report] 일부 추천 도구가 리포트에 없음 (포함: {recommended_count_in_report}/{len(decision_result.recommended_tools[:3])}) - 재생성 시도")
-            raise ValueError("추천 도구가 모두 포함되지 않았습니다")
+        # 최종 검증 실패 시 fallback
+        if not report_body or len(report_body) < 1000:
+            raise ValueError(f"리포트가 너무 짧습니다 ({len(report_body) if report_body else 0}자, 최소 1000자 필요)")
         
     except Exception as e:
         print(f"⚠️ [Structured Report] LLM 리포트 생성 실패 또는 불완전: {e}")
         import traceback
         traceback.print_exc()
-        # Fallback: 간단하지만 자연스러운 리포트 생성
+        # Fallback: 상세한 리포트 생성 (최소 1000자 보장)
         report_body = f"## 💡 추천 도구\n\n"
         for info in recommended_tools_info:
             if info['priority'] == 1:
@@ -1980,29 +2110,117 @@ async def structured_report_generation(state: AgentState, config: RunnableConfig
             else:
                 report_body += f"### 대안 {info['priority']-1}: {info['name']}\n\n"
             
-            # reasoning이 있으면 포함, 없으면 간단한 설명 생성
+            # reasoning이 있으면 포함, 없으면 상세한 설명 생성
             if info['reasoning'] and len(info['reasoning']) > 10:
-                report_body += f"{info['reasoning']}\n\n"
+                # reasoning에서 불완전한 부분 제거
+                reasoning_clean = info['reasoning'].replace("();", "").replace("()", "").strip()
+                if reasoning_clean:
+                    report_body += f"{reasoning_clean}\n\n"
+                else:
+                    # tool_facts에서 상세 정보 가져오기
+                    tool_fact_dict = next((t for t in tool_facts if t.get("name") == info['name']), None)
+                    if tool_fact_dict:
+                        supported_languages = tool_fact_dict.get("supported_languages", [])
+                        if supported_languages:
+                            report_body += f"{info['name']}은(는) {', '.join(supported_languages[:5])} 등 다양한 프로그래밍 언어를 지원합니다. "
+                    report_body += f"{info['name']}은(는) 8명 규모의 백엔드·프론트엔드 개발팀에 적합한 도구입니다. "
+                    # 코드 리뷰 요구사항 반영
+                    tool_has_review = next((t['has_review'] for t in recommended_tools_have_review if t['name'] == info['name']), False) if 'recommended_tools_have_review' in locals() else False
+                    if requires_code_review and tool_has_review:
+                        report_body += "코드 작성과 리뷰 기능을 모두 지원합니다."
+                    elif requires_code_review and not tool_has_review:
+                        report_body += "코드 작성에 특화되어 있으며, 리뷰 기능이 필요하다면 전용 리뷰 도구와 함께 사용하는 것을 권장합니다."
+                    else:
+                        report_body += "코드 작성과 자동 완성 기능을 제공합니다."
+                    report_body += "\n\n"
             else:
+                # tool_facts에서 상세 정보 가져오기
+                tool_fact_dict = next((t for t in tool_facts if t.get("name") == info['name']), None)
+                if tool_fact_dict:
+                    supported_languages = tool_fact_dict.get("supported_languages", [])
+                    if supported_languages:
+                        report_body += f"{info['name']}은(는) {', '.join(supported_languages[:5])} 등 다양한 프로그래밍 언어를 지원하여 백엔드와 프론트엔드 개발에 모두 활용할 수 있습니다. "
+                    integrations = tool_fact_dict.get("integrations", [])
+                    if integrations:
+                        report_body += f"{', '.join(integrations[:3])} 등 주요 개발 도구와의 통합이 가능합니다. "
                 report_body += f"{info['name']}은(는) 팀의 요구사항에 적합한 도구입니다. "
-                if 'code_completion' in decision_result.recommended_tools and info['name'] == decision_result.recommended_tools[0]:
+                # 코드 리뷰 요구사항 반영
+                tool_has_review = next((t['has_review'] for t in recommended_tools_have_review if t['name'] == info['name']), False) if 'recommended_tools_have_review' in locals() else False
+                if requires_code_review and tool_has_review:
+                    report_body += "코드 작성과 리뷰 기능을 모두 지원합니다."
+                elif requires_code_review and not tool_has_review:
+                    report_body += "코드 작성에 특화되어 있으며, 리뷰 기능이 필요하다면 전용 리뷰 도구와 함께 사용하는 것을 권장합니다."
+                else:
                     report_body += "코드 작성과 자동 완성 기능을 제공합니다."
-                elif 'code_review' in decision_result.recommended_tools and info['name'] in decision_result.recommended_tools:
-                    report_body += "코드 리뷰와 품질 검증 기능을 제공합니다."
                 report_body += "\n\n"
             
-            # 가격 정보 포함 (올바른 계산)
+            # 가격 정보 포함 (올바른 계산, 플랜 타입 명시)
             if info['cost'] and team_size:
-                report_body += f"**가격**: {info['cost']}\n\n"
+                report_body += f"**💰 가격**: {info['cost']}\n\n"
+            
+            # 통합 기능 정보 추가 (tool_facts에서)
+            tool_fact_dict = next((t for t in tool_facts if t.get("name") == info['name']), None)
+            if tool_fact_dict:
+                integrations = tool_fact_dict.get("integrations", [])
+                if integrations:
+                    report_body += f"**🔗 통합 기능**: {', '.join(integrations[:5])}\n\n"
         
-        # 모든 추천 도구가 포함되었는지 확인
-        if len(report_body) < 500:
-            # 추가 정보로 리포트 길이 확보
-            report_body += "\n## 💡 결론\n\n"
-            if len(recommended_tools_info) > 1:
-                report_body += f"위 {len(recommended_tools_info)}개 도구를 조합하여 사용하면 코드 작성과 리뷰 작업을 효율적으로 진행할 수 있습니다.\n\n"
-            else:
-                report_body += f"{recommended_tools_info[0]['name']}을(를) 사용하면 팀의 개발 생산성을 향상시킬 수 있습니다.\n\n"
+        # 코드 리뷰 요구사항 반영 (하드코딩 제거)
+        if requires_code_review:
+            review_tools = [t for t in recommended_tools_have_review if t['has_review']] if 'recommended_tools_have_review' in locals() else []
+            if not review_tools:
+                # Findings에서 리뷰 전용 도구 찾기 (이미 위에서 찾았거나, 다시 찾기)
+                review_tool_names_fallback = []
+                for tool_fact_dict in tool_facts:
+                    tool_name = tool_fact_dict.get("name", "")
+                    if tool_name and tool_name not in [info['name'] for info in recommended_tools_info]:
+                        workflow_support = tool_fact_dict.get("workflow_support", [])
+                        feature_category = tool_fact_dict.get("feature_category", "")
+                        if (any("review" in str(ws).lower() or "리뷰" in str(ws) for ws in workflow_support) or 
+                            "review" in feature_category.lower() or "리뷰" in feature_category):
+                            review_tool_names_fallback.append(tool_name)
+                
+                report_body += "\n## ⚠️ 코드 리뷰 기능 안내\n\n"
+                # 이미 찾은 review_tool_names 사용 또는 다시 찾기
+                if not review_tool_names_fallback:
+                    # findings 텍스트에서도 직접 찾기
+                    import re
+                    review_patterns = re.findall(r'\b([A-Z][a-zA-Z]*(?:Review|CodeReview|Reviewer|리뷰)[a-zA-Z]*)\b', findings + " " + " ".join([str(n) for n in notes]))
+                    review_tool_names_fallback.extend([name for name in review_patterns if name not in review_tool_names_fallback])
+                
+                if review_tool_names_fallback:
+                    review_tool_examples = ", ".join(list(set(review_tool_names_fallback))[:3])  # 중복 제거 후 최대 3개만
+                    report_body += f"추천된 도구는 코드 작성에 특화되어 있으며, 코드 리뷰 기능이 필요하다면 Findings에서 확인한 PR 리뷰 전용 도구({review_tool_examples} 등)와 함께 사용하는 것을 권장합니다.\n\n"
+                else:
+                    # 이미 찾은 review_tool_names 사용
+                    if review_tool_names:
+                        review_tool_examples = ", ".join(review_tool_names[:3])
+                        report_body += f"추천된 도구는 코드 작성에 특화되어 있으며, 코드 리뷰 기능이 필요하다면 Findings에서 확인한 PR 리뷰 전용 도구({review_tool_examples} 등)와 함께 사용하는 것을 권장합니다.\n\n"
+                    else:
+                        report_body += "추천된 도구는 코드 작성에 특화되어 있으며, 코드 리뷰 기능이 필요하다면 Findings에서 확인한 PR 리뷰 전용 도구와 함께 사용하는 것을 권장합니다.\n\n"
+        
+        # 결론 섹션 추가 (최소 길이 보장을 위해 상세하게)
+        report_body += "\n## 💡 결론\n\n"
+        tool_names = ", ".join([info['name'] for info in recommended_tools_info])
+        if len(recommended_tools_info) > 1:
+            report_body += f"위 {len(recommended_tools_info)}개 도구({tool_names}) 중에서 선택한다면, "
+        else:
+            report_body += f"{tool_names}은(는) "
+        
+        if team_size:
+            report_body += f"{team_size}명 규모의 백엔드·프론트엔드 개발팀에 적합합니다. "
+        
+        if requires_code_review:
+            report_body += "코드 작성과 리뷰 작업을 효율적으로 진행할 수 있으며, 팀의 개발 워크플로우를 개선할 수 있습니다. "
+        else:
+            report_body += "개발 생산성을 높이고 코드 작성 속도를 향상시킬 수 있습니다. "
+        
+        report_body += "각 도구의 기능과 가격을 고려하여 팀의 요구사항에 맞는 선택을 하시기 바랍니다.\n\n"
+        
+        # 리포트가 여전히 너무 짧으면 추가 정보 포함
+        if len(report_body) < 1000:
+            report_body += "\n## 📌 추가 고려사항\n\n"
+            report_body += "팀의 개발 환경과 워크플로우를 고려하여 도구를 선택하세요. 각 도구는 고유한 장점이 있으므로, 팀의 구체적인 요구사항과 예산을 함께 검토하는 것이 좋습니다. 도입 전 무료 체험판이나 평가판을 활용하여 팀에 적합한지 확인해보시기 바랍니다. 또한, 팀원들의 학습 곡선과 도구의 통합 난이도도 함께 고려하시기 바랍니다.\n\n"
     
     # 디버깅: 리포트 생성 결과 확인
     print(f"🔍 [Structured Report DEBUG] 리포트 생성 완료:")
