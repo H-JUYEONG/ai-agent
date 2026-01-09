@@ -46,22 +46,31 @@ class DecisionEngine:
                 ]:
                     continue
             
-            # 언어 지원 확인
+            # 언어 지원 확인 (완화: 도구의 supported_languages가 비어있거나 정보가 없으면 필터링에서 제외하지 않음)
+            # 대신 점수 계산 단계에서 처리 (language_support_score로 반영)
             if self.user_context.tech_stack:
-                required_languages = [
-                    lang.lower() for lang in self.user_context.tech_stack
-                ]
-                tool_languages = [
-                    lang.lower() for lang in tool.supported_languages
-                ]
-                if not any(
-                    req_lang in tool_lang or tool_lang in req_lang
-                    for req_lang in required_languages
-                    for tool_lang in tool_languages
-                ):
-                    # 필수 언어가 하나도 지원되지 않으면 제외
-                    if required_languages:  # 필수 언어가 명시된 경우만
-                        continue
+                if not tool.supported_languages:
+                    # supported_languages 정보가 없으면 필터링에서 제외하지 않음 (점수 계산에서 처리)
+                    print(f"  ⚠️ [Filter] {tool.name}: supported_languages 정보 없음 → 필터링 통과 (점수 계산에서 처리)")
+                else:
+                    required_languages = [
+                        lang.lower() for lang in self.user_context.tech_stack
+                    ]
+                    tool_languages = [
+                        lang.lower() for lang in tool.supported_languages
+                    ]
+                    # 필수 언어 중 하나라도 지원하는지 확인
+                    has_match = any(
+                        req_lang in tool_lang or tool_lang in req_lang
+                        for req_lang in required_languages
+                        for tool_lang in tool_languages
+                    )
+                    if not has_match:
+                        # 필수 언어가 하나라도 지원되지 않으면 필터링에서 제외하지 않음 (점수 계산에서 처리)
+                        print(f"  ⚠️ [Filter] {tool.name}: 필수 언어({required_languages}) 미지원, 지원 언어({tool_languages}) → 필터링 통과 (점수 계산에서 감점)")
+                    else:
+                        print(f"  ✅ [Filter] {tool.name}: 필수 언어 일부 지원 확인")
+                # 필터링 단계에서는 제외하지 않음, 점수 계산에서 반영
             
             # 통합 기능 확인
             if self.user_context.required_integrations:
@@ -79,12 +88,12 @@ class DecisionEngine:
                     # 필수 통합이 하나도 없으면 제외
                     continue
             
-            # 🆕 업무 요구사항 필터링 (코드 리뷰가 필수인 경우)
+            # 🆕 업무 요구사항 필터링 (완화: 코드 리뷰가 필수여도 다른 기능을 지원하면 통과)
             if self.user_context.workflow_focus:
-                # 코드 리뷰가 필수인데 도구가 지원하지 않으면 제외
-                if WorkflowType.CODE_REVIEW in self.user_context.workflow_focus:
-                    if WorkflowType.CODE_REVIEW not in tool.workflow_support:
-                        continue  # 코드 리뷰 필수인데 지원 안 하면 제외
+                # 모든 필수 업무를 지원하지 않아도, 하나라도 지원하면 통과 (점수 계산에서 감점)
+                # 완전히 제외하는 대신, 점수 계산 단계에서 부분 점수를 주는 것이 더 나음
+                # 예: code_review 필수인데 지원 안 하면 workflow_fit_score가 낮아지지만 완전히 제외하지는 않음
+                pass  # 필터링 단계에서는 제외하지 않음, 점수 계산에서 반영
             
             filtered.append(tool)
         
@@ -94,60 +103,74 @@ class DecisionEngine:
         """도구 점수 계산"""
         exclusion_reason = None
         
-        # 1. 언어 지원 점수
-        language_support_score = 0.0
+        # 1. 언어 지원 점수 (완화: 정보가 부족하거나 부분 지원해도 점수 부여)
+        language_support_score = 1.0  # 기본값: 만점 (정보가 없으면 관대하게)
         if self.user_context.tech_stack:
             required_languages = [
                 lang.lower() for lang in self.user_context.tech_stack
             ]
-            tool_languages = [
-                lang.lower() for lang in tool.supported_languages
-            ]
-            matches = sum(
-                1 for req_lang in required_languages
-                for tool_lang in tool_languages
-                if req_lang in tool_lang or tool_lang in req_lang
-            )
-            language_support_score = matches / len(required_languages) if required_languages else 1.0
-        else:
-            language_support_score = 1.0  # 언어 요구사항이 없으면 만점
+            if tool.supported_languages:
+                tool_languages = [
+                    lang.lower() for lang in tool.supported_languages
+                ]
+                matches = sum(
+                    1 for req_lang in required_languages
+                    for tool_lang in tool_languages
+                    if req_lang in tool_lang or tool_lang in req_lang
+                )
+                if required_languages:
+                    # 일부만 지원해도 부분 점수 부여 (0.5 이상 보장)
+                    language_support_score = max(0.5, matches / len(required_languages))
+            else:
+                # tool.supported_languages 정보가 없으면 중간 점수 (완전 제외 방지)
+                language_support_score = 0.7  # 정보 부족해도 관대하게
         
-        # 2. 통합 기능 점수
-        integration_score = 0.0
+        # 2. 통합 기능 점수 (완화: 정보 부족해도 부분 점수 부여)
+        integration_score = 0.7  # 기본값: 높은 점수 (정보가 없으면 관대하게)
         if self.user_context.required_integrations:
-            tool_integrations = [
-                integ.lower() for integ in tool.integrations
-            ]
-            required_integrations = [
-                integ.lower() for integ in self.user_context.required_integrations
-            ]
-            matches = sum(
-                1 for req_integ in required_integrations
-                for tool_integ in tool_integrations
-                if req_integ in tool_integ or tool_integ in req_integ
-            )
-            integration_score = matches / len(required_integrations) if required_integrations else 1.0
-        else:
-            integration_score = 0.5  # 통합 요구사항이 없으면 중간 점수
+            if tool.integrations:
+                tool_integrations = [
+                    integ.lower() for integ in tool.integrations
+                ]
+                required_integrations = [
+                    integ.lower() for integ in self.user_context.required_integrations
+                ]
+                matches = sum(
+                    1 for req_integ in required_integrations
+                    for tool_integ in tool_integrations
+                    if req_integ in tool_integ or tool_integ in req_integ
+                )
+                if required_integrations:
+                    # 일부만 지원해도 부분 점수 부여 (최소 0.5 보장)
+                    integration_score = max(0.5, matches / len(required_integrations))
+            else:
+                # tool.integrations 정보가 없으면 중간 점수 (완전 제외 방지)
+                integration_score = 0.6  # 정보 부족해도 관대하게
         
-        # 3. 업무 적합성 점수 (필수 요구사항은 가중치 높게)
-        workflow_fit_score = 0.0
+        # 3. 업무 적합성 점수 (완화: 정보 부족해도 부분 점수 부여)
+        workflow_fit_score = 0.8  # 기본값: 높은 점수 (정보가 없으면 관대하게)
         if self.user_context.workflow_focus:
-            matches = sum(
-                1 for workflow in self.user_context.workflow_focus
-                if workflow in tool.workflow_support
-            )
-            # 필수 요구사항이 모두 지원되면 만점, 일부만 지원되면 부분 점수
-            workflow_fit_score = matches / len(self.user_context.workflow_focus) if self.user_context.workflow_focus else 1.0
-            
-            # 🆕 필수 업무(특히 CODE_REVIEW)가 지원되지 않으면 큰 감점
-            if WorkflowType.CODE_REVIEW in self.user_context.workflow_focus:
-                if WorkflowType.CODE_REVIEW not in tool.workflow_support:
-                    workflow_fit_score = 0.0  # PR 리뷰 필수인데 지원 안 하면 0점
-                    if not exclusion_reason:
-                        exclusion_reason = "PR 리뷰 기능 미지원"
-        else:
-            workflow_fit_score = 0.5  # 업무 요구사항이 없으면 중간 점수
+            if tool.workflow_support:
+                matches = sum(
+                    1 for workflow in self.user_context.workflow_focus
+                    if workflow in tool.workflow_support
+                )
+                # 필수 요구사항이 모두 지원되면 만점, 일부만 지원되면 부분 점수 (최소 0.4 보장)
+                if self.user_context.workflow_focus:
+                    workflow_fit_score = max(0.4, matches / len(self.user_context.workflow_focus))
+                
+                # 코드 리뷰가 요청되었지만 지원하지 않으면 감점 (완전 제외는 하지 않음)
+                if WorkflowType.CODE_REVIEW in self.user_context.workflow_focus:
+                    if WorkflowType.CODE_REVIEW not in tool.workflow_support:
+                        # 코드 작성 기능이 있으면 최소 0.4점 부여 (완전 제외 방지)
+                        if WorkflowType.CODE_COMPLETION in tool.workflow_support or WorkflowType.CODE_GENERATION in tool.workflow_support:
+                            workflow_fit_score = max(0.4, workflow_fit_score * 0.6)  # 최소 0.4점, 최대 40% 감점
+                        else:
+                            # 코드 작성 기능도 없으면 더 낮은 점수 (하지만 완전 0점은 아님)
+                            workflow_fit_score = max(0.2, workflow_fit_score * 0.3)
+            else:
+                # tool.workflow_support 정보가 없으면 중간 점수 (완전 제외 방지)
+                workflow_fit_score = 0.6  # 정보 부족해도 관대하게
         
         # 4. 가격 점수 (예산이 없어도 상대적 비교)
         price_score = 1.0
@@ -235,28 +258,84 @@ class DecisionEngine:
         category_groups: Dict[str, List[tuple[ToolFact, ToolScore]]] = {}
         
         for tool, score in zip(tools, scores):
-            category = tool.feature_category
+            category = tool.feature_category or "code_completion"  # 기본값 설정
             if category not in category_groups:
                 category_groups[category] = []
             category_groups[category].append((tool, score))
         
         # 각 카테고리에서 점수가 가장 높은 것만 선택
         selected_tools = []
+        print(f"🔍 [Duplicate Removal] 카테고리 그룹: {list(category_groups.keys())}")
         for category, tool_score_pairs in category_groups.items():
             # 점수 순으로 정렬
             tool_score_pairs.sort(key=lambda x: x[1].total_score, reverse=True)
-            # 가장 높은 점수만 선택
-            selected_tools.append(tool_score_pairs[0][0])
+            print(f"🔍 [Duplicate Removal] {category} 카테고리: {[(t.name, s.total_score) for t, s in tool_score_pairs]}")
+            # 가장 높은 점수만 선택 (같은 점수면 첫 번째만)
+            selected_tool = tool_score_pairs[0][0]
+            selected_score = tool_score_pairs[0][1]
+            selected_tools.append(selected_tool)
+            print(f"✅ [Duplicate Removal] {category} 카테고리에서 {selected_tool.name} 선택 (점수: {selected_score.total_score:.3f})")
         
         return selected_tools
     
     def make_decision(self, tools: List[ToolFact]) -> DecisionResult:
         """최종 판단"""
+        # 🚨 디버깅: 필터링 전 도구 목록
+        print("=" * 80)
+        print("🔍 [Decision Engine] 필터링 전")
+        print(f"  입력 도구 개수: {len(tools)}개")
+        print(f"  입력 도구명: {[tool.name for tool in tools[:10]]}")
+        print("=" * 80)
+        
         # 1. 필터링
         filtered_tools = self.filter_tools(tools)
         
+        # 🚨 디버깅: 필터링 후 도구 목록
+        print("=" * 80)
+        print("🔍 [Decision Engine] 필터링 후")
+        print(f"  필터링 후 도구 개수: {len(filtered_tools)}개")
+        if filtered_tools:
+            print(f"  필터링 후 도구명: {[tool.name for tool in filtered_tools]}")
+        else:
+            print("  ⚠️ 필터링 후 도구가 없습니다!")
+            print(f"  필터링 조건:")
+            print(f"    - 제외 목록: {self.user_context.excluded_tools}")
+            print(f"    - 보안 요구: {self.user_context.security_required}")
+            print(f"    - 필수 언어: {self.user_context.tech_stack}")
+            print(f"    - 필수 통합: {self.user_context.required_integrations}")
+            print(f"    - 필수 업무: {[w.value for w in self.user_context.workflow_focus]}")
+        print("=" * 80)
+        
         # 2. 점수 계산
+        if not filtered_tools:
+            # 필터링 후 도구가 없으면 빈 결과 반환
+            print("⚠️ [Decision Engine] 필터링 후 도구가 없어 Decision Engine 실행 불가")
+            return DecisionResult(
+                recommended_tools=[],
+                excluded_tools=[tool.name for tool in tools],
+                tool_scores=[],
+                reasoning={}
+            )
+        
         scores = [self.calculate_score(tool) for tool in filtered_tools]
+        
+        # 🚨 디버깅: 스코어링 결과
+        print("=" * 80)
+        print("🔍 [Decision Engine] 스코어링 결과")
+        if scores:
+            for score in scores[:5]:  # 상위 5개만 출력
+                print(f"  {score.tool_name}:")
+                print(f"    총점: {score.total_score:.3f}")
+                print(f"    언어 지원: {score.language_support_score:.3f}")
+                print(f"    통합: {score.integration_score:.3f}")
+                print(f"    업무 적합성: {score.workflow_fit_score:.3f}")
+                print(f"    가격: {score.price_score:.3f}")
+                print(f"    보안: {score.security_score:.3f}")
+                if score.exclusion_reason:
+                    print(f"    제외 이유: {score.exclusion_reason}")
+        else:
+            print("  ⚠️ 스코어링 결과가 없습니다!")
+        print("=" * 80)
         
         # 🆕 2-1. 예산이 없으면 가격 상대적 비교로 점수 조정
         if not self.user_context.budget_max and self.user_context.team_size:

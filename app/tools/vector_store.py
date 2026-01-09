@@ -145,15 +145,19 @@ class VectorStore:
         if not self.available:
             return False
         
-        try:
-            points = []
-            expire_timestamp = int((datetime.now() + timedelta(days=ttl_days)).timestamp())
+        # 컬렉션이 없으면 자동 생성 시도
+        self._ensure_collection()
+        
+        # Points 먼저 생성 (예외 발생 지점 분리)
+        points = []
+        expire_timestamp = int((datetime.now() + timedelta(days=ttl_days)).timestamp())
+        
+        for fact in facts:
+            text = fact.get("text", "")
+            if not text:
+                continue
             
-            for fact in facts:
-                text = fact.get("text", "")
-                if not text:
-                    continue
-                
+            try:
                 # 임베딩 생성
                 embedding = self.embedding_model.encode(text).tolist()
                 
@@ -174,20 +178,42 @@ class VectorStore:
                     vector=embedding,
                     payload=payload
                 ))
-            
-            if points:
-                self.client.upsert(
-                    collection_name=self.collection_name,
-                    points=points
-                )
-                print(f"✅ Vector DB 저장 완료: {len(points)}개 facts (TTL={ttl_days}일)")
-                return True
-            
+            except Exception as e:
+                print(f"⚠️ Fact 처리 실패 (스킵): {e}")
+                continue
+        
+        if not points:
             return False
         
+        # Upsert 시도
+        try:
+            self.client.upsert(
+                collection_name=self.collection_name,
+                points=points
+            )
+            print(f"✅ Vector DB 저장 완료: {len(points)}개 facts (TTL={ttl_days}일)")
+            return True
+        
         except Exception as e:
-            print(f"❌ Vector DB 저장 실패: {e}")
-            return False
+            # 404 에러인 경우 컬렉션 재생성 시도
+            error_str = str(e)
+            if "404" in error_str or "Not found" in error_str or "doesn't exist" in error_str:
+                print(f"⚠️ 컬렉션이 없어 재생성 시도: {self.collection_name}")
+                try:
+                    self._ensure_collection()
+                    # 재시도
+                    self.client.upsert(
+                        collection_name=self.collection_name,
+                        points=points
+                    )
+                    print(f"✅ Vector DB 저장 완료 (재시도 성공): {len(points)}개 facts")
+                    return True
+                except Exception as retry_e:
+                    print(f"❌ Vector DB 저장 실패 (재시도 후): {retry_e}")
+                    return False
+            else:
+                print(f"❌ Vector DB 저장 실패: {e}")
+                return False
     
     def search_facts(
         self,
@@ -334,6 +360,10 @@ class VectorStore:
         if not self.available:
             return False
         
+        # 컬렉션이 없으면 자동 생성 시도
+        self._ensure_query_collection()
+        
+        # Point 먼저 생성 (예외 발생 지점 분리)
         try:
             # 질문 임베딩 생성
             query_embedding = self.embedding_model.encode(query).tolist()
@@ -356,7 +386,12 @@ class VectorStore:
                 vector=query_embedding,
                 payload=payload
             )
-            
+        except Exception as e:
+            print(f"❌ 질문 임베딩 생성 실패: {e}")
+            return False
+        
+        # Upsert 시도
+        try:
             self.client.upsert(
                 collection_name=self.query_collection_name,
                 points=[point]
@@ -365,8 +400,25 @@ class VectorStore:
             return True
         
         except Exception as e:
-            print(f"❌ 질문 매핑 저장 실패: {e}")
-            return False
+            # 404 에러인 경우 컬렉션 재생성 시도
+            error_str = str(e)
+            if "404" in error_str or "Not found" in error_str or "doesn't exist" in error_str:
+                print(f"⚠️ 질문 컬렉션이 없어 재생성 시도: {self.query_collection_name}")
+                try:
+                    self._ensure_query_collection()
+                    # 재시도
+                    self.client.upsert(
+                        collection_name=self.query_collection_name,
+                        points=[point]
+                    )
+                    print(f"✅ 질문-캐시 키 매핑 저장 완료 (재시도 성공): '{query[:50]}...'")
+                    return True
+                except Exception as retry_e:
+                    print(f"❌ 질문 매핑 저장 실패 (재시도 후): {retry_e}")
+                    return False
+            else:
+                print(f"❌ 질문 매핑 저장 실패: {e}")
+                return False
     
     def search_similar_query(
         self,

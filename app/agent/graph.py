@@ -21,6 +21,7 @@ from app.agent.nodes import (
     run_decision_engine,
     final_report_generation,
     structured_report_generation,
+    clarify_missing_constraints,
     cannot_answer,
     route_after_research,
 )
@@ -67,6 +68,7 @@ deep_researcher_builder.add_node("research_supervisor", supervisor_subgraph)
 deep_researcher_builder.add_node("run_decision_engine", run_decision_engine)
 deep_researcher_builder.add_node("final_report_generation", final_report_generation)
 deep_researcher_builder.add_node("structured_report_generation", structured_report_generation)
+deep_researcher_builder.add_node("clarify_missing_constraints", clarify_missing_constraints)
 deep_researcher_builder.add_node("cannot_answer", cannot_answer)
 
 # 워크플로우 연결
@@ -82,6 +84,7 @@ deep_researcher_builder.add_conditional_edges(
     {
         "structured_report_generation": "structured_report_generation",
         "final_report_generation": "final_report_generation",
+        "clarify_missing_constraints": "clarify_missing_constraints",
         "cannot_answer": "cannot_answer"
     }
 )
@@ -89,6 +92,7 @@ deep_researcher_builder.add_conditional_edges(
 # 모든 리포트 생성 노드에서 END로
 deep_researcher_builder.add_edge("structured_report_generation", END)
 deep_researcher_builder.add_edge("final_report_generation", END)
+deep_researcher_builder.add_edge("clarify_missing_constraints", END)
 deep_researcher_builder.add_edge("cannot_answer", END)
 
 # 메인 그래프 컴파일

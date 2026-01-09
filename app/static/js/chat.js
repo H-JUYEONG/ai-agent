@@ -75,7 +75,7 @@ function appendMessageWithOptions() {
     // 메시지 말풍선
     const messageDiv = document.createElement("div");
     messageDiv.className = "message assistant";
-    messageDiv.innerHTML = "안녕하세요! 👋 코딩 AI 도입 의사결정 어시스턴트입니다.<br><br>개인 또는 팀의 상황을 알려주시면, 그에 맞는 코딩 AI 도구를 추천해드립니다.<br><br>다음 정보를 알려주세요:<br>• 👤 <strong>사용 형태</strong> (예: 개인 사용, 5명 팀)<br>• 💰 <strong>예산</strong> (예: 월 50만원 이하)<br>• 🔒 <strong>보안 요구사항</strong> (예: 코드가 외부로 유출되면 안 됨)<br>• 💻 <strong>주요 사용 언어</strong> (예: Python, JavaScript, Java)<br>• 📋 <strong>업무 특성</strong> (예: 웹 개발, 모바일 앱, 데이터 분석)<br><br>💡 <strong>모든 정보를 주실 필요는 없어요. 알려주신 만큼 맞춤 추천해드립니다!</strong>";
+    messageDiv.innerHTML = "안녕하세요! 👋<br><br><strong>코딩 AI 도입을 도와드리는 의사결정 어시스턴트</strong>입니다.<br><br>💬 <strong>\"우리 팀에 어떤 코딩 AI가 맞을까?\"</strong>처럼<br>편하게 질문해 주세요!<br><br>✨ 필요하면 제가 <strong>예산, 팀 규모, 보안 요구사항</strong> 등을<br>추가로 질문해서 <strong>맞춤 추천</strong>을 만들어 드립니다.";
     messages.appendChild(messageDiv);
     messages.scrollTop = messages.scrollHeight;
     
