@@ -363,12 +363,22 @@ async def clarify_with_user(
     
     # ========== 🆕 3단계: 벡터 DB로 유사 질문 검색 ==========
     # 캐시 미스 시 유사한 질문이 있는지 벡터 DB에서 검색
+    # 1차: 정규화된 텍스트로 검색 (동일한 의미의 질문이 정규화되어 저장되어 있을 가능성)
     similar_query = vector_store.search_similar_query(
-        query=last_user_message,
+        query=normalized['normalized_text'],
         domain=domain,
         limit=1,
-        score_threshold=0.85  # 높은 유사도만 (85% 이상)
+        score_threshold=0.75  # 정규화된 텍스트는 더 유사할 가능성
     )
+    
+    # 2차: 정규화된 텍스트로 못 찾으면 원본 질문으로 검색
+    if not similar_query or not similar_query.get("cache_key"):
+        similar_query = vector_store.search_similar_query(
+            query=last_user_message,
+            domain=domain,
+            limit=1,
+            score_threshold=0.75  # 유사 질문 감지율 향상을 위해 임계값 조정 (0.85 → 0.75)
+        )
     
     if similar_query and similar_query.get("cache_key"):
         similar_cache_key = similar_query["cache_key"]
