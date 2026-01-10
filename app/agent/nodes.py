@@ -14,6 +14,7 @@ from langchain_core.messages import (
 )
 from langchain_core.runnables import RunnableConfig
 from langgraph.types import Command
+from langgraph.graph import END
 
 from app.agent.configuration import Configuration
 from app.agent.state import (
@@ -59,7 +60,7 @@ configurable_model = init_chat_model(
 
 async def clarify_with_user(
     state: AgentState, config: RunnableConfig
-) -> Command[Literal["write_research_brief", "__end__"]]:
+) -> Command[Literal["write_research_brief", END]]:
     """사용자 질문 명확화 및 주제 검증 + 쿼리 정규화 + 캐시 조회"""
     
     # re 모듈을 함수 내에서 명시적으로 import하여 스코프 문제 해결
@@ -77,9 +78,46 @@ async def clarify_with_user(
     # 디버깅
     print(f"🔍 [DEBUG] clarify - Messages: {len(messages)}개, HumanMessage: {len(human_messages)}개, 질문 순서: {question_number}번째, Follow-up: {is_followup}")
     
-    # ========== 🆕 1단계: 쿼리 정규화 (캐시 키 생성) ==========
     last_user_message = messages[-1].content if messages else ""
     
+    # ========== 🚨 LLM 기반 주제 검증 (검색/캐시 전에 먼저 수행) ==========
+    # 주제 검증을 LLM이 판단하도록 하여 불필요한 쿼리 정규화/캐시 조회 방지
+    # 키워드 선검증 제거: LLM이 모든 질문의 주제 관련성을 판단
+    model_config_clarify = {
+        "model": configurable.research_model,
+        "max_tokens": configurable.research_model_max_tokens,
+        "api_key": get_api_key_for_model(configurable.research_model, config),
+    }
+    
+    clarification_model = (
+        configurable_model
+        .with_structured_output(ClarifyWithUser)
+        .with_retry(stop_after_attempt=configurable.max_structured_output_retries)
+        .with_config(model_config_clarify)
+    )
+    
+    prompt_content = clarify_with_user_instructions.format(
+        messages=get_buffer_string(messages),
+        date=get_today_str(),
+        domain=domain,
+        is_followup="YES" if is_followup else "NO"
+    )
+    
+    response = await clarification_model.ainvoke([HumanMessage(content=prompt_content)])
+    
+    # 🚨 주제 관련성 체크 (검색/캐시 전 차단)
+    if not response.is_on_topic:
+        print(f"⚠️ [주제 검증] 주제에서 벗어난 질문 감지 - 캐시/검색/벡터DB 저장 차단")
+        off_topic_msg = response.off_topic_message if response.off_topic_message else "죄송합니다. 저는 코딩 AI 도구 추천을 전문으로 하는 어시스턴트입니다. 다시 말씀해주세요!"
+        return Command(
+            goto=END,
+            update={"messages": [AIMessage(content=off_topic_msg)]}
+        )
+    
+    # 주제 검증 통과 → 이제 쿼리 정규화 및 캐시 조회 진행
+    print(f"✅ [주제 검증] 주제 검증 통과 - 정상 프로세스 진행")
+    
+    # ========== 🆕 1단계: 쿼리 정규화 (캐시 키 생성) ==========
     model_config = {
         "model": configurable.research_model,
         "max_tokens": 200,  # 정규화는 짧게
@@ -200,9 +238,20 @@ async def clarify_with_user(
                 print(f"✅ [캐시 처리] 리포트 본문은 캐시에서 가져옴 ({len(report_body)}자), 인사 멘트는 final_report_generation과 동일한 방식으로 생성")
                 
                 # final_report_generation과 동일한 모델 및 설정 사용
+                # 모델별 max_tokens 제한 확인 및 적용
+                model_name_greeting = configurable.final_report_model.lower()
+                if "gpt-4o-mini" in model_name_greeting:
+                    greeting_max_tokens = min(configurable.final_report_model_max_tokens, 16384)  # gpt-4o-mini 최대 16384
+                elif "gpt-4o" in model_name_greeting and "mini" not in model_name_greeting:
+                    greeting_max_tokens = min(configurable.final_report_model_max_tokens, 16384)  # gpt-4o 최대 16384
+                elif "gpt-4" in model_name_greeting:
+                    greeting_max_tokens = min(configurable.final_report_model_max_tokens, 4096)  # gpt-4 최대 4096
+                else:
+                    greeting_max_tokens = min(configurable.final_report_model_max_tokens, 16384)  # 기본값
+                
                 greeting_model_config = {
                     "model": configurable.final_report_model,
-                    "max_tokens": configurable.final_report_model_max_tokens,
+                    "max_tokens": greeting_max_tokens,
                     "api_key": get_api_key_for_model(configurable.final_report_model, config),
                 }
                 
@@ -303,7 +352,7 @@ async def clarify_with_user(
                 print(f"✅ [캐시 처리] 리포트 본문 길이: {len(report_body)}자, 시작 100자: {report_body[:100]}")
                 
                 return Command(
-                    goto="__end__",
+                    goto=END,
                     update={"messages": [
                         AIMessage(content=greeting),
                         AIMessage(content=report_body)
@@ -349,9 +398,20 @@ async def clarify_with_user(
                 print(f"✅ [유사 질문 처리] 리포트 본문은 캐시에서 가져옴 ({len(report_body)}자), 인사 멘트는 새로 생성")
                 
                 # final_report_generation과 동일한 방식으로 인사 멘트 생성
+                # 모델별 max_tokens 제한 확인 및 적용
+                model_name_greeting2 = configurable.final_report_model.lower()
+                if "gpt-4o-mini" in model_name_greeting2:
+                    greeting_max_tokens2 = min(configurable.final_report_model_max_tokens, 16384)  # gpt-4o-mini 최대 16384
+                elif "gpt-4o" in model_name_greeting2 and "mini" not in model_name_greeting2:
+                    greeting_max_tokens2 = min(configurable.final_report_model_max_tokens, 16384)  # gpt-4o 최대 16384
+                elif "gpt-4" in model_name_greeting2:
+                    greeting_max_tokens2 = min(configurable.final_report_model_max_tokens, 4096)  # gpt-4 최대 4096
+                else:
+                    greeting_max_tokens2 = min(configurable.final_report_model_max_tokens, 16384)  # 기본값
+                
                 greeting_model_config = {
                     "model": configurable.final_report_model,
-                    "max_tokens": configurable.final_report_model_max_tokens,
+                    "max_tokens": greeting_max_tokens2,
                     "api_key": get_api_key_for_model(configurable.final_report_model, config),
                 }
                 
@@ -382,7 +442,7 @@ async def clarify_with_user(
                     print(f"✅ [유사 질문 처리] 인사 멘트 생성 완료: '{greeting}'")
                     
                     return Command(
-                        goto="__end__",
+                        goto=END,
                         update={"messages": [
                             AIMessage(content=greeting),
                             AIMessage(content=report_body)
@@ -392,7 +452,7 @@ async def clarify_with_user(
                     print(f"⚠️ [유사 질문 처리] 인사 멘트 생성 실패: {e}")
                     greeting = f"네! {last_user_message[:30]}에 대해 조사해드리겠습니다."
                     return Command(
-                        goto="__end__",
+                        goto=END,
                         update={"messages": [
                             AIMessage(content=greeting),
                             AIMessage(content=report_body)
@@ -400,39 +460,10 @@ async def clarify_with_user(
                     )
     
     # 캐시 미스 및 유사 질문도 없음 → 새로 생성
-    print(f"⚠️ [캐시 MISS + 유사 질문 없음] 새로 생성 진행")
+    # 주제 검증은 이미 위(라인 138-147)에서 완료되었으므로 response를 재사용
+    print(f"⚠️ [캐시 MISS + 유사 질문 없음] 새로 생성 진행 (주제 검증 완료)")
     
-    model_config = {
-        "model": configurable.research_model,
-        "max_tokens": configurable.research_model_max_tokens,
-        "api_key": get_api_key_for_model(configurable.research_model, config),
-    }
-    
-    clarification_model = (
-        configurable_model
-        .with_structured_output(ClarifyWithUser)
-        .with_retry(stop_after_attempt=configurable.max_structured_output_retries)
-        .with_config(model_config)
-    )
-    
-    prompt_content = clarify_with_user_instructions.format(
-        messages=get_buffer_string(messages),
-        date=get_today_str(),
-        domain=domain,
-        is_followup="YES" if is_followup else "NO"
-    )
-    
-    response = await clarification_model.ainvoke([HumanMessage(content=prompt_content)])
-    
-    # 🚨 주제 관련성 체크 (항상 실행!)
-    if not response.is_on_topic:
-        print(f"⚠️ [DEBUG] 주제에서 벗어난 질문 감지")
-        return Command(
-            goto="__end__",
-            update={"messages": [AIMessage(content=response.off_topic_message)]}
-        )
-    
-    # 명확화 비활성화 시 바로 다음 단계로 (주제 검증 후)
+    # 명확화 비활성화 시 바로 다음 단계로 (주제 검증은 이미 완료됨)
     if not configurable.allow_clarification:
         print(f"✅ [DEBUG] 주제 검증 통과 - 바로 연구 시작")
         return Command(
@@ -1411,6 +1442,25 @@ async def final_report_generation(state: AgentState, config: RunnableConfig):
     findings = "\n\n".join(notes)
     domain = state.get("domain", "AI 서비스")
     
+    # 모델별 max_tokens 제한 확인 및 적용
+    model_name = configurable.final_report_model.lower()
+    if "gpt-4o-mini" in model_name:
+        max_tokens_allowed = min(configurable.final_report_model_max_tokens, 16384)  # gpt-4o-mini 최대 16384
+    elif "gpt-4o" in model_name and "mini" not in model_name:
+        max_tokens_allowed = min(configurable.final_report_model_max_tokens, 16384)  # gpt-4o 최대 16384
+    elif "gpt-4" in model_name:
+        max_tokens_allowed = min(configurable.final_report_model_max_tokens, 4096)  # gpt-4 최대 4096
+    else:
+        max_tokens_allowed = min(configurable.final_report_model_max_tokens, 16384)  # 기본값
+    
+    writer_model_config = {
+        "model": configurable.final_report_model,
+        "max_tokens": max_tokens_allowed,
+        "api_key": get_api_key_for_model(configurable.final_report_model, config),
+    }
+    
+    print(f"🔍 [DEBUG] 모델: {configurable.final_report_model}, max_tokens: {max_tokens_allowed} (원래 설정: {configurable.final_report_model_max_tokens})")
+    
     # Messages 가져오기 및 Follow-up 판단
     messages_list = state.get("messages", [])
     human_messages = [msg for msg in messages_list if isinstance(msg, HumanMessage)]
@@ -1461,12 +1511,6 @@ async def final_report_generation(state: AgentState, config: RunnableConfig):
                     AIMessage(content=error_message)
                 ],
                 "notes": {"type": "override", "value": []}
-            }
-    
-    writer_model_config = {
-        "model": configurable.final_report_model,
-        "max_tokens": configurable.final_report_model_max_tokens,
-        "api_key": get_api_key_for_model(configurable.final_report_model, config),
     }
     
     # Messages 가져오기 및 Follow-up 판단
@@ -1886,16 +1930,60 @@ async def structured_report_generation(state: AgentState, config: RunnableConfig
                         else:
                             return f"{plan_name}: ${monthly_cost:.0f}/월 (${annual_cost:.0f}/년)"
                 
+                # 사용량 기반 과금 확인
+                usage_based_plans = [p for p in pricing_plans if p.get("plan_type") == "usage-based"]
+                if usage_based_plans:
+                    # 사용량 기반 과금은 가격 계산이 불가능하므로 플랜명에 가격 정보 포함
+                    usage_plan = usage_based_plans[0]
+                    plan_name = usage_plan.get("name", "사용량 기반 과금")
+                    source_url = usage_plan.get("source_url", "")
+                    if source_url:
+                        return f"{plan_name} (정확한 가격은 사용량에 따라 다르며, {source_url}에서 확인 가능)"
+                    else:
+                        return f"{plan_name} (정확한 가격은 사용량에 따라 다르므로 공식 사이트에서 확인 필요)"
+                
+                # 연간 플랜 처리 (price_per_year 또는 price_per_user_per_year)
+                annual_plans = [p for p in pricing_plans if p.get("price_per_year") or p.get("price_per_user_per_year")]
+                if annual_plans:
+                    cheapest_annual = min(annual_plans, key=lambda p: (p.get("price_per_year") or float('inf')) if p.get("price_per_year") else (p.get("price_per_user_per_year") or 0) * team_size if p.get("price_per_user_per_year") else float('inf'))
+                    
+                    price_per_year = cheapest_annual.get("price_per_year")
+                    price_per_user_per_year = cheapest_annual.get("price_per_user_per_year")
+                    plan_name = cheapest_annual.get("name", "플랜")
+                    plan_type = cheapest_annual.get("plan_type", "unknown")
+                    source_url = cheapest_annual.get("source_url", "")
+                    
+                    if price_per_year and price_per_year > 0:
+                        # 전체 팀 연간 가격인 경우
+                        monthly_cost = price_per_year / 12
+                        annual_cost = price_per_year
+                        if plan_type in ["team", "business", "enterprise"]:
+                            return f"팀 플랜 ({plan_name}): ${monthly_cost:.0f}/월 (${annual_cost:.0f}/년)"
+                        else:
+                            return f"{plan_name}: ${monthly_cost:.0f}/월 (${annual_cost:.0f}/년)"
+                    elif price_per_user_per_year and price_per_user_per_year > 0:
+                        # 사용자당 연간 가격인 경우
+                        monthly_cost = (price_per_user_per_year * team_size) / 12
+                        annual_cost = price_per_user_per_year * team_size
+                        if plan_type in ["team", "business", "enterprise"]:
+                            return f"팀 플랜 ({plan_name}): ${monthly_cost:.0f}/월 (${annual_cost:.0f}/년)"
+                        else:
+                            return f"{plan_name}: ${monthly_cost:.0f}/월 (${annual_cost:.0f}/년, 팀 플랜 확인 권장)"
+                
                 # price_per_month만 있는 경우 (개인 플랜일 수 있음)
                 individual_plans = [p for p in pricing_plans if p.get("plan_type") in ["individual", "personal", "pro"]]
                 if individual_plans:
                     cheapest_individual = min(individual_plans, key=lambda p: p.get("price_per_month") or float('inf'))
                     price_per_month = cheapest_individual.get("price_per_month")
+                    plan_name = cheapest_individual.get("name", "개인 플랜")
+                    source_url = cheapest_individual.get("source_url", "")
                     if price_per_month and price_per_month > 0:
-                        # 개인 플랜은 1인당 기준으로 계산 (하지만 팀용으로는 부적합)
-                        monthly_cost = price_per_month * team_size  # 개인 플랜 × 인원수
-                        annual_cost = monthly_cost * 12
-                        return f"개인 플랜 기준: ${monthly_cost:.0f}/월 (${annual_cost:.0f}/년, 공식 팀 플랜 확인 권장)"
+                        # 팀 규모가 있으면 개인 플랜을 그대로 표시하고 팀 플랜 확인 권장
+                        # 개인 플랜 가격을 팀 인원수로 곱하면 안 됨 (부정확한 정보)
+                        if source_url:
+                            return f"개인 플랜 ({plan_name}): ${price_per_month:.0f}/월 (팀 플랜 정보는 {source_url}에서 확인 필요)"
+                        else:
+                            return f"개인 플랜 ({plan_name}): ${price_per_month:.0f}/월 (팀 플랜은 공식 사이트에서 확인 필요)"
         return ""
     
     # Decision Engine 결과를 자연스러운 형태로 정리 (내부 평가 용어 완전 제거)
@@ -2010,11 +2098,24 @@ async def structured_report_generation(state: AgentState, config: RunnableConfig
     )
     
     # LLM으로 리포트 생성
+    # 모델별 max_tokens 제한 확인 및 적용
+    model_name = configurable.final_report_model.lower()
+    if "gpt-4o-mini" in model_name:
+        max_tokens_allowed = min(configurable.final_report_model_max_tokens, 16384)  # gpt-4o-mini 최대 16384
+    elif "gpt-4o" in model_name:
+        max_tokens_allowed = min(configurable.final_report_model_max_tokens, 4096)  # gpt-4o 최대 4096 (일반적으로)
+    elif "gpt-4" in model_name:
+        max_tokens_allowed = min(configurable.final_report_model_max_tokens, 4096)  # gpt-4 최대 4096
+    else:
+        max_tokens_allowed = min(configurable.final_report_model_max_tokens, 16384)  # 기본값
+    
     writer_model_config = {
         "model": configurable.final_report_model,
-        "max_tokens": configurable.final_report_model_max_tokens,
+        "max_tokens": max_tokens_allowed,
         "api_key": get_api_key_for_model(configurable.final_report_model, config),
     }
+    
+    print(f"🔍 [DEBUG] 모델: {configurable.final_report_model}, max_tokens: {max_tokens_allowed} (원래 설정: {configurable.final_report_model_max_tokens})")
     
     try:
         print(f"🔍 [DEBUG] Structured Report 생성 시작 (프롬프트 길이: {len(report_prompt)}자)")
@@ -2043,19 +2144,97 @@ async def structured_report_generation(state: AgentState, config: RunnableConfig
                 report_body = re.sub(r'\b보통\b|\b부적합\b|\b부분 지원\b|\b미흡\b|\b미지원\b|\b미충족\b', '', report_body)
                 report_body = re.sub(r'\|\s*도구\s*\|\s*언어 지원\s*\|\s*업무 적합성.*?\n', '', report_body, flags=re.DOTALL)  # 비교 테이블 제거
                 
+                # 리포트 내용 완성도 검증 (잘림 여부 확인)
+                # 마지막 문장이 완전한지 확인
+                is_complete = True
+                if report_body:
+                    last_100_chars = report_body.strip()[-100:].strip()
+                    # 문장이 중간에 잘렸는지 확인 (불완전한 단어, 문장 부호 없이 끝나는 경우)
+                    # 특정 잘린 패턴 확인
+                    truncated_patterns = [
+                        "다양한 프로그래",  # "다양한 프로그래밍 언어"가 잘림
+                        "포함한 여러",  # "포함한 여러 언어를 지원합니다"가 잘림
+                        "TypeSc",  # "TypeScript"가 잘림
+                        " 및 Ty",  # "Java, JavaScript 및 TypeScript"가 잘림
+                        "JavaScript 및 Ty",  # TypeScript가 잘림
+                        "Java, JavaScript 및 Ty",  # TypeScript가 잘림
+                        "*",  # 마크다운 불완전한 리스트로 끝남
+                        "**",  # 마크다운 불완전한 볼드로 끝남
+                    ]
+                    
+                    # 불완전한 단어 패턴 (2-3글자로 끝나는 경우) - "Ty", "Java, JavaScript 및 Ty" 등
+                    if re.search(r'[가-힣a-zA-Z]{1,3}\s*$', last_100_chars):
+                        # 마지막 문자가 불완전한 단어로 끝나는지 확인
+                        last_word = last_100_chars.strip().split()[-1] if last_100_chars.strip().split() else ""
+                        if last_word and len(last_word) <= 3 and not any(last_word.endswith(p) for p in ['.', '!', '?', ',', ':', ';']):
+                            is_complete = False
+                            print(f"⚠️ [Structured Report] 불완전한 단어 패턴 감지: '{last_word}' (마지막 단어가 너무 짧음)")
+                    
+                    # 마지막 문자가 "*"로 끝나는 경우도 잘림으로 간주
+                    if report_body.strip().endswith("*") or report_body.strip().endswith("**"):
+                        is_complete = False
+                        print(f"⚠️ [Structured Report] 마크다운 불완전 패턴 감지: 리포트가 '*' 또는 '**'로 끝남")
+                    
+                    for pattern in truncated_patterns:
+                        if pattern in last_100_chars:
+                            is_complete = False
+                            print(f"⚠️ [Structured Report] 잘림 패턴 감지: '{pattern}'")
+                            break
+                    
+                    # 문장 부호로 끝나지 않고 불완전한 단어로 끝나는 경우
+                    if is_complete:
+                        last_chars = report_body.strip()[-30:]
+                        # 마지막이 문장 부호로 끝나는지 확인
+                        if not any(last_chars.rstrip().endswith(p) for p in ['.', '!', '?', ':', ';', ')', '}', ']', '>']):
+                            # 불완전한 단어 패턴 확인 (1-4글자로 끝나는 경우)
+                            if re.search(r'[가-힣a-zA-Z]{1,4}\s*$', last_chars):
+                                is_complete = False
+                                print(f"⚠️ [Structured Report] 불완전한 문장 감지: '{last_chars}'")
+                
                 # 리포트 완성도 검증
-                if not report_body or len(report_body) < 1000:
+                if not report_body or len(report_body) < 1000 or not is_complete:
                     if attempt < max_retries:
-                        print(f"⚠️ [Structured Report] 리포트가 너무 짧음 ({len(report_body)}자, 최소 1000자 필요) - 재생성 시도 {attempt + 1}/{max_retries}")
-                        # 프롬프트에 더 명확한 길이 요구사항 추가
-                        report_prompt = report_prompt.replace(
-                            "리포트는 최소 1000자 이상이어야 합니다!",
-                            f"리포트는 최소 1000자 이상이어야 합니다! (현재 {len(report_body)}자로 부족합니다. 각 도구에 대해 가격, 통합 기능, 장점, 추천 이유를 더 상세히 설명하세요!)"
-                        )
+                        if len(report_body) < 1000:
+                            issue_desc = "너무 짧음"
+                        elif not is_complete:
+                            issue_desc = "내용이 잘림"
+                        else:
+                            issue_desc = "불완전"
+                        print(f"⚠️ [Structured Report] 리포트 {issue_desc} ({len(report_body)}자, 최소 1000자 필요) - 재생성 시도 {attempt + 1}/{max_retries}")
+                        # 재생성 시 더 강력한 요구사항 추가
+                        retry_note = f"\n\n⚠️⚠️⚠️ 매우 중요 - 재생성 요구사항 ({attempt + 1}번째 시도):\n"
+                        retry_note += f"- 리포트는 현재 {len(report_body)}자로 부족하거나 내용이 잘렸습니다!\n"
+                        retry_note += f"- 반드시 최소 1500자 이상, 각 도구당 최소 400자 이상 상세히 설명하세요!\n"
+                        retry_note += f"- 마지막 문장은 반드시 완전한 문장으로 끝나야 합니다! (마침표, 느낌표, 물음표 등)\n"
+                        retry_note += f"- 단어가 중간에 잘리면 안 됩니다! (예: 'TypeScript'를 'Ty'로 줄이면 안 됩니다)\n"
+                        retry_note += f"- 각 도구의 가격, 통합 기능, 장점, 추천 이유를 더 상세히 설명하세요!\n"
+                        retry_note += f"- 결론 섹션을 포함하여 리포트를 완성하세요!\n"
+                        
+                        # 기존 요구사항 업데이트 또는 추가
+                        if "리포트는 최소" in report_prompt:
+                            # 기존 요구사항을 더 강화된 버전으로 교체
+                            import re
+                            report_prompt = re.sub(
+                                r'리포트는 최소 \d+자 이상이어야 합니다!.*?마지막 문장은 반드시 완전한 문장 부호.*?',
+                                f"리포트는 최소 1500자 이상이어야 하며, 각 도구당 최소 400자 이상 상세히 설명하세요! 반드시 완전한 문장으로 끝나야 합니다! 단어가 중간에 잘리면 안 됩니다!{retry_note}",
+                                report_prompt,
+                                flags=re.DOTALL
+                            )
+                        else:
+                            report_prompt += retry_note
                         continue
                     else:
-                        print(f"⚠️ [Structured Report] 리포트가 너무 짧음 ({len(report_body)}자, 최소 1000자 필요) - 재시도 실패, fallback 사용")
-                        raise ValueError(f"리포트가 너무 짧습니다 ({len(report_body)}자, 최소 1000자 필요)")
+                        if len(report_body) < 1000:
+                            issue_desc = "너무 짧음"
+                        elif not is_complete:
+                            issue_desc = "내용이 잘림"
+                        else:
+                            issue_desc = "불완전"
+                        print(f"⚠️ [Structured Report] 리포트 {issue_desc} ({len(report_body)}자, 최소 1000자 필요) - 재시도 실패, fallback 사용")
+                        if len(report_body) < 1000:
+                            raise ValueError(f"리포트가 너무 짧습니다 ({len(report_body)}자, 최소 1000자 필요)")
+                        else:
+                            raise ValueError(f"리포트 내용이 잘렸습니다 ({len(report_body)}자)")
                 
                 # 추천 도구가 모두 포함되어 있는지 확인
                 recommended_count_in_report = sum(1 for tool_name in decision_result.recommended_tools[:3] if tool_name in report_body)
@@ -2076,8 +2255,51 @@ async def structured_report_generation(state: AgentState, config: RunnableConfig
                         break
                     if team_size:
                         tool_section = report_body[tool_pos:tool_pos + 800]
-                        if "가격" not in tool_section and "$" not in tool_section:
+                        # 가격 정보 확인 (가격, $, 사용량 기반, API 호출 등 모두 확인)
+                        has_price_info = (
+                            "가격" in tool_section or 
+                            "$" in tool_section or 
+                            "사용량" in tool_section or 
+                            "API 호출" in tool_section or 
+                            "토큰" in tool_section or
+                            "usage-based" in tool_section.lower()
+                        )
+                        if not has_price_info:
                             print(f"⚠️ [Structured Report] {tool_name} 가격 정보가 리포트에 없음 (경고만)")
+                            
+                # 리포트 내용 잘림 확인 (마지막 문장이 완전한지)
+                if report_body and len(report_body) > 100:
+                    last_50_chars = report_body.strip()[-50:]
+                    
+                    # 불완전한 패턴 확인
+                    is_truncated = False
+                    
+                    # 특정 잘린 패턴 확인
+                    if "다양한 프로그래" in last_50_chars or "TypeSc" in last_50_chars:
+                        is_truncated = True
+                    # 문장 부호 없이 끝나고, 불완전한 단어로 끝나는 경우
+                    elif not any(last_50_chars.rstrip().endswith(p) for p in ['.', '!', '?', ':', ';', ')', '}', ']', '>']):
+                        # 마지막이 불완전한 단어로 끝나는지 확인 (1-3글자)
+                        if re.search(r'[가-힣a-zA-Z]{1,3}\s*$', last_50_chars[-10:]):
+                            is_truncated = True
+                    
+                    if is_truncated:
+                        if attempt < max_retries:
+                            print(f"⚠️ [Structured Report] 리포트 내용이 잘린 것으로 의심됨 (마지막 30자: {report_body.strip()[-30:]}) - 재생성 시도 {attempt + 1}/{max_retries}")
+                            if "리포트의 마지막 문장을 반드시 완전하게 작성하세요" not in report_prompt:
+                                report_prompt += "\n\n⚠️ 중요: 리포트의 마지막 문장을 반드시 완전하게 작성하세요! 문장이 중간에 잘리면 안 됩니다! 모든 문장은 반드시 문장 부호(마침표, 물음표 등)로 끝나야 합니다!"
+                            continue
+                        else:
+                            print(f"⚠️ [Structured Report] 리포트 내용이 잘린 것으로 의심됨 (마지막 30자: {report_body.strip()[-30:]}) - 재시도 실패, fallback 사용")
+                            # fallback으로 진행하되, 잘린 부분 제거
+                            # 마지막 불완전한 문장 제거
+                            lines = report_body.strip().split('\n')
+                            if lines:
+                                # 마지막 줄이 불완전하면 제거
+                                if len(lines[-1].strip()) < 10 or re.search(r'[가-힣a-zA-Z]{1,3}\s*$', lines[-1].strip()[-5:]):
+                                    report_body = '\n'.join(lines[:-1]).strip()
+                                    if not report_body.endswith(('.', '!', '?', ':', ';')):
+                                        report_body += '.'
                 
                 if not all_tools_included and attempt < max_retries:
                     print(f"⚠️ [Structured Report] 도구 정보 누락 - 재생성 시도 {attempt + 1}/{max_retries}")
@@ -2094,9 +2316,10 @@ async def structured_report_generation(state: AgentState, config: RunnableConfig
                 else:
                     raise
         
-        # 최종 검증 실패 시 fallback
-        if not report_body or len(report_body) < 1000:
-            raise ValueError(f"리포트가 너무 짧습니다 ({len(report_body) if report_body else 0}자, 최소 1000자 필요)")
+        # 최종 검증: 리포트가 생성되었는지 확인
+        # (길이 및 완성도 검증은 위 루프에서 이미 했으므로 여기서는 확인만)
+        if not report_body:
+            raise ValueError(f"리포트가 생성되지 않았습니다")
         
     except Exception as e:
         print(f"⚠️ [Structured Report] LLM 리포트 생성 실패 또는 불완전: {e}")
@@ -2142,21 +2365,48 @@ async def structured_report_generation(state: AgentState, config: RunnableConfig
                         report_body += f"{info['name']}은(는) {', '.join(supported_languages[:5])} 등 다양한 프로그래밍 언어를 지원하여 백엔드와 프론트엔드 개발에 모두 활용할 수 있습니다. "
                     integrations = tool_fact_dict.get("integrations", [])
                     if integrations:
-                        report_body += f"{', '.join(integrations[:3])} 등 주요 개발 도구와의 통합이 가능합니다. "
-                report_body += f"{info['name']}은(는) 팀의 요구사항에 적합한 도구입니다. "
+                        report_body += f"GitHub, GitLab, {', '.join(integrations[:3])} 등 주요 개발 도구와의 통합이 가능합니다. "
+                    features = tool_fact_dict.get("primary_features", [])
+                    if features:
+                        report_body += f"주요 기능으로는 {', '.join(features[:3])} 등이 있습니다. "
+                
+                report_body += f"{info['name']}은(는) {team_size}명 규모의 백엔드·프론트엔드 개발팀에 적합한 도구입니다. "
                 # 코드 리뷰 요구사항 반영
                 tool_has_review = next((t['has_review'] for t in recommended_tools_have_review if t['name'] == info['name']), False) if 'recommended_tools_have_review' in locals() else False
                 if requires_code_review and tool_has_review:
-                    report_body += "코드 작성과 리뷰 기능을 모두 지원합니다."
+                    report_body += "코드 작성과 리뷰 기능을 모두 지원하여 팀의 코드 품질 향상에 도움을 줄 수 있습니다. "
                 elif requires_code_review and not tool_has_review:
-                    report_body += "코드 작성에 특화되어 있으며, 리뷰 기능이 필요하다면 전용 리뷰 도구와 함께 사용하는 것을 권장합니다."
+                    report_body += "코드 작성에 특화되어 있으며, 리뷰 기능이 필요하다면 전용 리뷰 도구와 함께 사용하는 것을 권장합니다. "
                 else:
-                    report_body += "코드 작성과 자동 완성 기능을 제공합니다."
+                    report_body += "코드 작성과 자동 완성 기능을 제공하여 개발 생산성을 향상시킬 수 있습니다. "
                 report_body += "\n\n"
             
             # 가격 정보 포함 (올바른 계산, 플랜 타입 명시)
             if info['cost'] and team_size:
-                report_body += f"**💰 가격**: {info['cost']}\n\n"
+                # 가격 정보가 완전한지 확인 (":"로 끝나지 않도록)
+                cost_info = info['cost'].strip()
+                if cost_info and not cost_info.endswith(":"):
+                    report_body += f"**💰 가격**: {cost_info}\n\n"
+                elif cost_info:
+                    # tool_facts에서 가격 정보 다시 가져오기
+                    tool_fact_dict = next((t for t in tool_facts if t.get("name") == info['name']), None)
+                    if tool_fact_dict:
+                        pricing_plans = tool_fact_dict.get("pricing_plans", [])
+                        if pricing_plans:
+                            # 첫 번째 플랜 사용
+                            plan = pricing_plans[0]
+                            plan_name = plan.get("name", "플랜")
+                            if plan.get("price_per_user_per_month"):
+                                price = plan["price_per_user_per_month"] * team_size
+                                report_body += f"**💰 가격**: 팀 플랜 ({plan_name}): ${price:.0f}/월\n\n"
+                            elif plan.get("price_per_month"):
+                                report_body += f"**💰 가격**: {plan_name}: ${plan['price_per_month']:.0f}/월 (팀 플랜은 공식 사이트에서 확인 필요)\n\n"
+                            else:
+                                report_body += f"**💰 가격**: 가격 정보는 공식 사이트에서 확인이 필요합니다.\n\n"
+                        else:
+                            report_body += f"**💰 가격**: 가격 정보는 공식 사이트에서 확인이 필요합니다.\n\n"
+                    else:
+                        report_body += f"**💰 가격**: 가격 정보는 공식 사이트에서 확인이 필요합니다.\n\n"
             
             # 통합 기능 정보 추가 (tool_facts에서)
             tool_fact_dict = next((t for t in tool_facts if t.get("name") == info['name']), None)
@@ -2203,24 +2453,62 @@ async def structured_report_generation(state: AgentState, config: RunnableConfig
         report_body += "\n## 💡 결론\n\n"
         tool_names = ", ".join([info['name'] for info in recommended_tools_info])
         if len(recommended_tools_info) > 1:
-            report_body += f"위 {len(recommended_tools_info)}개 도구({tool_names}) 중에서 선택한다면, "
+            report_body += f"위 {len(recommended_tools_info)}개 도구({tool_names})를 함께 사용하면 "
         else:
-            report_body += f"{tool_names}은(는) "
+            report_body += f"{tool_names}을(를) 사용하면 "
         
         if team_size:
-            report_body += f"{team_size}명 규모의 백엔드·프론트엔드 개발팀에 적합합니다. "
+            report_body += f"{team_size}명 규모의 백엔드·프론트엔드 개발팀의 생산성을 크게 향상시킬 수 있습니다. "
         
         if requires_code_review:
-            report_body += "코드 작성과 리뷰 작업을 효율적으로 진행할 수 있으며, 팀의 개발 워크플로우를 개선할 수 있습니다. "
+            report_body += "이 도구들은 코드 작성과 리뷰 작업을 효율적으로 진행할 수 있도록 도와주며, 팀의 개발 워크플로우를 개선할 수 있습니다. "
+            # 리뷰 기능 지원 여부 언급
+            review_count = sum(1 for t in recommended_tools_have_review if t['has_review']) if 'recommended_tools_have_review' in locals() else 0
+            if review_count > 0:
+                report_body += "특히 코드 리뷰 기능을 내장하고 있어 팀원 간의 코드 품질 향상과 지식 공유에 기여할 수 있습니다. "
         else:
             report_body += "개발 생산성을 높이고 코드 작성 속도를 향상시킬 수 있습니다. "
         
-        report_body += "각 도구의 기능과 가격을 고려하여 팀의 요구사항에 맞는 선택을 하시기 바랍니다.\n\n"
+        report_body += "각 도구의 기능과 가격을 고려하여 팀의 요구사항에 맞는 선택을 하시기 바랍니다. 도입 전 무료 체험판이나 평가판을 활용하여 팀에 적합한지 확인해보시기 바랍니다.\n\n"
         
-        # 리포트가 여전히 너무 짧으면 추가 정보 포함
+        # 리포트가 여전히 너무 짧으면 추가 정보 포함 (최소 1000자 보장)
+        # 중복 방지: 이미 "추가 고려사항" 섹션이 있으면 추가하지 않음
+        has_additional_section = "## 📌 추가 고려사항" in report_body or "## 추가 고려사항" in report_body
+        
         if len(report_body) < 1000:
-            report_body += "\n## 📌 추가 고려사항\n\n"
-            report_body += "팀의 개발 환경과 워크플로우를 고려하여 도구를 선택하세요. 각 도구는 고유한 장점이 있으므로, 팀의 구체적인 요구사항과 예산을 함께 검토하는 것이 좋습니다. 도입 전 무료 체험판이나 평가판을 활용하여 팀에 적합한지 확인해보시기 바랍니다. 또한, 팀원들의 학습 곡선과 도구의 통합 난이도도 함께 고려하시기 바랍니다.\n\n"
+            if not has_additional_section:
+                report_body += "\n## 📌 추가 고려사항\n\n"
+            else:
+                # 이미 섹션이 있으면 그 다음에 이어서 추가
+                report_body += "\n\n"
+            
+            # 중복 추가 방지: 이미 같은 내용이 있으면 추가하지 않음
+            existing_content = "팀의 개발 환경과 워크플로우를 고려하여 도구를 선택하세요"
+            if existing_content not in report_body:
+                report_body += "팀의 개발 환경과 워크플로우를 고려하여 도구를 선택하세요. 각 도구는 고유한 장점이 있으므로, 팀의 구체적인 요구사항과 예산을 함께 검토하는 것이 좋습니다. 도입 전 무료 체험판이나 평가판을 활용하여 팀에 적합한지 확인해보시기 바랍니다. 또한, 팀원들의 학습 곡선과 도구의 통합 난이도도 함께 고려하시기 바랍니다. "
+            
+            # 도구별 추가 정보
+            for info in recommended_tools_info:
+                tool_fact_dict = next((t for t in tool_facts if t.get("name") == info['name']), None)
+                if tool_fact_dict and len(report_body) < 1000:
+                    features = tool_fact_dict.get("features", [])
+                    integrations = tool_fact_dict.get("integrations", [])
+                    if features:
+                        feature_text = f"{info['name']}은(는) {', '.join(features[:3])} 등의 기능을 제공합니다. "
+                        if feature_text not in report_body:
+                            report_body += feature_text
+                    if integrations and len(report_body) < 1000:
+                        integration_text = f"{info['name']}은(는) {', '.join(integrations[:3])} 등과 통합할 수 있습니다. "
+                        if integration_text not in report_body:
+                            report_body += integration_text
+            
+            # 여전히 부족하면 일반적인 조언 추가 (중복 방지)
+            if len(report_body) < 1000:
+                additional_text = "팀의 개발 문화와 도구 사용 경험을 고려하여 선택하시기 바랍니다. 도입 후 팀원들의 피드백을 수집하여 필요시 다른 도구로 전환하는 것도 고려해볼 수 있습니다. "
+                if additional_text not in report_body:
+                    report_body += additional_text
+            
+            report_body += "\n\n"
     
     # 디버깅: 리포트 생성 결과 확인
     print(f"🔍 [Structured Report DEBUG] 리포트 생성 완료:")

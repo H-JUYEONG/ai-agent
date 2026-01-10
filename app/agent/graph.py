@@ -73,7 +73,9 @@ deep_researcher_builder.add_node("cannot_answer", cannot_answer)
 
 # 워크플로우 연결
 deep_researcher_builder.add_edge(START, "clarify_with_user")
-deep_researcher_builder.add_edge("clarify_with_user", "write_research_brief")
+# 🚨 clarify_with_user는 Command.goto를 사용하므로 하드코딩된 엣지 제거
+# Command의 goto가 우선순위를 가짐 - 엣지를 추가하지 않으면 Command.goto 사용
+# deep_researcher_builder.add_edge("clarify_with_user", "write_research_brief")  # 제거!
 deep_researcher_builder.add_edge("write_research_brief", "research_supervisor")
 deep_researcher_builder.add_edge("research_supervisor", "run_decision_engine")
 

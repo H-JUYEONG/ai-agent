@@ -254,27 +254,61 @@ class DecisionEngine:
     
     def remove_duplicate_features(self, tools: List[ToolFact], scores: List[ToolScore]) -> List[ToolFact]:
         """같은 기능을 하는 도구 중 점수가 높은 것만 남기기"""
-        # 기능 카테고리별로 그룹화
+        # workflow_focus에 포함된 workflow_type별로 그룹화
         category_groups: Dict[str, List[tuple[ToolFact, ToolScore]]] = {}
         
+        # workflow_focus에 포함된 workflow_type 목록
+        workflow_types = [wf.value for wf in self.user_context.workflow_focus] if self.user_context.workflow_focus else []
+        
+        # workflow_focus의 각 workflow_type별로 카테고리를 미리 생성
+        for workflow_type in workflow_types:
+            category_groups[workflow_type] = []
+        
         for tool, score in zip(tools, scores):
-            category = tool.feature_category or "code_completion"  # 기본값 설정
-            if category not in category_groups:
-                category_groups[category] = []
-            category_groups[category].append((tool, score))
+            # workflow_focus에 포함된 workflow_type 중 tool이 지원하는 것 찾기
+            tool_workflows = [wf.value for wf in tool.workflow_support] if tool.workflow_support else []
+            
+            # tool이 지원하는 workflow_type 중 workflow_focus에 포함된 것 찾기
+            matched_workflows = [wt for wt in workflow_types if wt in tool_workflows]
+            
+            if matched_workflows:
+                # workflow_focus에 맞는 workflow_type별로 그룹화
+                for workflow_type in matched_workflows:
+                    if workflow_type not in category_groups:
+                        category_groups[workflow_type] = []
+                    category_groups[workflow_type].append((tool, score))
+            else:
+                # workflow_focus와 매칭되지 않으면 feature_category로 그룹화
+                category = tool.feature_category or "code_completion"
+                
+                # feature_category가 workflow_focus의 workflow_type과 일치하는지 확인
+                # 예: feature_category가 "code_review"이고 workflow_focus에 "code_review"가 있으면 해당 카테고리에 추가
+                category_matched = False
+                if category in workflow_types:
+                    category_groups[category].append((tool, score))
+                    category_matched = True
+                
+                # 매칭되지 않으면 기본 카테고리에 추가
+                if not category_matched:
+                    if category not in category_groups:
+                        category_groups[category] = []
+                    category_groups[category].append((tool, score))
         
         # 각 카테고리에서 점수가 가장 높은 것만 선택
         selected_tools = []
+        selected_tool_names = set()  # 중복 제거를 위한 set
         print(f"🔍 [Duplicate Removal] 카테고리 그룹: {list(category_groups.keys())}")
         for category, tool_score_pairs in category_groups.items():
             # 점수 순으로 정렬
             tool_score_pairs.sort(key=lambda x: x[1].total_score, reverse=True)
             print(f"🔍 [Duplicate Removal] {category} 카테고리: {[(t.name, s.total_score) for t, s in tool_score_pairs]}")
-            # 가장 높은 점수만 선택 (같은 점수면 첫 번째만)
-            selected_tool = tool_score_pairs[0][0]
-            selected_score = tool_score_pairs[0][1]
-            selected_tools.append(selected_tool)
-            print(f"✅ [Duplicate Removal] {category} 카테고리에서 {selected_tool.name} 선택 (점수: {selected_score.total_score:.3f})")
+            # 이미 선택되지 않은 도구 중 가장 높은 점수 선택
+            for tool, score in tool_score_pairs:
+                if tool.name not in selected_tool_names:
+                    selected_tools.append(tool)
+                    selected_tool_names.add(tool.name)
+                    print(f"✅ [Duplicate Removal] {category} 카테고리에서 {tool.name} 선택 (점수: {score.total_score:.3f})")
+                    break  # 각 카테고리당 하나만 선택
         
         return selected_tools
     

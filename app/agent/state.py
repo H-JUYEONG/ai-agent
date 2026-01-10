@@ -43,7 +43,7 @@ class ClarifyWithUser(BaseModel):
     )
     off_topic_message: str = Field(
         description="주제에서 벗어난 경우 사용자에게 보낼 거부 메시지",
-        default="죄송합니다. 저는 코딩 AI 도구 추천을 전문으로 하는 챗봇입니다. 다시 질문해주세요!",
+        default="죄송합니다. 저는 코딩 AI 도구 추천을 전문으로 하는 어시스턴트입니다. 다시 말씀해주세요!",
     )
 
 

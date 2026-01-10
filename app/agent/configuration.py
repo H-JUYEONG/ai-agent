@@ -26,7 +26,7 @@ class Configuration(BaseModel):
     compression_model_max_tokens: int = Field(default=8192)
     
     final_report_model: str = Field(default="gpt-4o-mini")  # 비용 절감!
-    final_report_model_max_tokens: int = Field(default=16384)
+    final_report_model_max_tokens: int = Field(default=16384)  # gpt-4o-mini 최대 토큰 제한 (16384)
     
     # 검색 설정
     search_max_results: int = Field(default=5)  # 결과 5개 (정확도↑)

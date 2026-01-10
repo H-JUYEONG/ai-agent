@@ -34,8 +34,16 @@ class PricingPlan(BaseModel):
         default=None,
         description="월 가격 (USD, 개인용)"
     )
+    price_per_year: Optional[float] = Field(
+        default=None,
+        description="연간 가격 (USD, 전체 팀 또는 개인용)"
+    )
+    price_per_user_per_year: Optional[float] = Field(
+        default=None,
+        description="사용자당 연간 가격 (USD)"
+    )
     plan_type: str = Field(
-        description="플랜 타입: individual, team, enterprise"
+        description="플랜 타입: individual, team, enterprise, usage-based"
     )
     source_url: Optional[str] = Field(
         default=None,

@@ -27,12 +27,26 @@ fact_extraction_prompt = """당신은 연구 결과에서 구조화된 사실을
    - **팀용 플랜** (plan_type: "team" 또는 "enterprise"):
      * price_per_user_per_month: 사용자당 월 가격 (USD) - 필수!
      * price_per_month: null 또는 전체 팀 월 가격 (USD)
-   - 플랜 타입 (plan_type): "individual" (개인용), "team" (팀용), "enterprise" (엔터프라이즈)
+   - **연간 플랜** (plan_type: "team" 또는 "enterprise"):
+     * "연간", "년간", "per year", "annually", "$X/년", "$X/year" 같은 표현이 있으면 연간 플랜으로 인식
+     * price_per_year: 전체 팀 연간 가격 (USD) - "연간 $4,200 (10명 기준)" 같은 경우
+     * price_per_user_per_year: 사용자당 연간 가격 (USD) - "사용자당 연간 $500" 같은 경우
+     * price_per_month: null
+     * price_per_user_per_month: null
+   - **사용량 기반 과금** (plan_type: "usage-based"):
+     * "사용량 기반", "API 호출당", "토큰 기반", "입력/출력 토큰", "usage-based", "per API call" 같은 표현이 있으면 plan_type: "usage-based"
+     * price_per_month: null
+     * price_per_user_per_month: null
+     * Findings에서 확인한 사용량 기반 가격 정보를 name 필드에 포함 (예: "입력: $1.50/백만 토큰, 출력: $6.00/백만 토큰")
+   - 플랜 타입 (plan_type): "individual" (개인용), "team" (팀용), "enterprise" (엔터프라이즈), "usage-based" (사용량 기반)
    - 출처 URL (source_url): 가격 정보 출처
    - 🚨 **예시**:
      * 개인용: "Pro 플랜: $10/월" → plan_type: "individual", price_per_month: 10
      * 팀용: "Team 플랜: 사용자당 $19/월" → plan_type: "team", price_per_user_per_month: 19
      * 엔터프라이즈: "Enterprise: 사용자당 $25/월" → plan_type: "enterprise", price_per_user_per_month: 25
+     * 연간 플랜: "연간 $4,200 (10명 기준)" → plan_type: "team", price_per_year: 4200
+     * 연간 플랜: "사용자당 연간 $500" → plan_type: "team", price_per_user_per_year: 500
+     * 사용량 기반: "입력: $1.50/백만 토큰, 출력: $6.00/백만 토큰" → plan_type: "usage-based", name: "입력: $1.50/백만 토큰, 출력: $6.00/백만 토큰"
 3. **통합 기능** (integrations): ⚠️ 예시: GitHub, GitLab, Slack, Jira 등은 참고용일 뿐, 실제 통합 서비스는 Findings에서 확인한 값 사용
 4. **지원 언어** (supported_languages): ⚠️ 예시: Python, JavaScript, Java 등은 참고용일 뿐, 실제 지원 언어는 Findings에서 확인한 값 사용
    - 🚨 **중요**: 프레임워크나 런타임이 언급되면 해당 언어도 포함하세요!
@@ -73,6 +87,8 @@ JSON 배열로 반환하세요. 각 도구마다 하나의 객체:
         "name": "플랜명",
         "price_per_user_per_month": 숫자 또는 null,
         "price_per_month": 숫자 또는 null,
+        "price_per_year": 숫자 또는 null,
+        "price_per_user_per_year": 숫자 또는 null,
         "plan_type": "individual" | "team" | "enterprise",
         "source_url": "URL"
       }}
@@ -224,7 +240,11 @@ async def extract_tool_facts(
                             if not plan_data.get("plan_type"):
                                 # plan_type 추론 시도
                                 plan_name = plan_data.get("name", "").lower()
-                                if any(keyword in plan_name for keyword in ["team", "business", "enterprise"]):
+                                plan_name_full = plan_name + " " + str(fact_data.get("name", "")).lower()
+                                # 사용량 기반 확인 (가장 먼저)
+                                if any(keyword in plan_name_full for keyword in ["usage-based", "usage based", "사용량 기반", "api 호출당", "api 호출", "토큰 기반", "입력/출력", "per api call", "per token", "per million tokens"]):
+                                    plan_data["plan_type"] = "usage-based"
+                                elif any(keyword in plan_name for keyword in ["team", "business", "enterprise"]):
                                     plan_data["plan_type"] = "team"
                                 elif any(keyword in plan_name for keyword in ["individual", "personal", "pro"]):
                                     plan_data["plan_type"] = "individual"
@@ -245,6 +265,9 @@ async def extract_tool_facts(
                         except ValueError:
                             security_policy = None
                     
+                    # tool_name 먼저 정의 (다른 곳에서 사용하므로)
+                    tool_name = fact_data["name"]
+                    
                     # workflow_support 변환
                     workflow_support = []
                     for workflow in fact_data.get("workflow_support", []):
@@ -253,11 +276,46 @@ async def extract_tool_facts(
                         except ValueError:
                             pass
                     
+                    # feature_category 기반으로 workflow_support 자동 추가
+                    # Findings에서 명확히 추출하지 못했더라도 feature_category를 보고 추정
+                    if not workflow_support:
+                        feature_category = fact_data.get("feature_category", "code_completion")
+                        tool_name_lower = tool_name.lower()
+                        findings_text = fact_data.get("findings_text", "").lower()
+                        
+                        # 코드 리뷰 관련 키워드 확인
+                        review_keywords = ["code review", "pr review", "pull request", "코드 리뷰", "pr 리뷰", "리뷰"]
+                        if (feature_category == "code_review" or 
+                            any(kw in tool_name_lower for kw in ["review", "리뷰", "codacy", "sonarqube", "qodo", "code-rabbit", "coderabbit", "greptile"]) or
+                            any(kw in findings_text for kw in review_keywords)):
+                            workflow_support.append(WorkflowType.CODE_REVIEW)
+                        
+                        # 코드 생성/완성 관련
+                        if (feature_category == "code_completion" or 
+                            "completion" in tool_name_lower or "autocomplete" in tool_name_lower):
+                            workflow_support.append(WorkflowType.CODE_COMPLETION)
+                        
+                        if (feature_category == "code_generation" or 
+                            "generation" in tool_name_lower or "generate" in tool_name_lower):
+                            workflow_support.append(WorkflowType.CODE_GENERATION)
+                        
+                        # 기본값: code_completion
+                        if not workflow_support:
+                            workflow_support.append(WorkflowType.CODE_COMPLETION)
+                    
                     # feature_category 기본값 설정 (None이면 기본값 사용)
                     feature_category = fact_data.get("feature_category") or "code_completion"
                     
+                    # OpenAI Codex 특별 처리: Codex는 독립 제품이 아니라 API 기능이므로 적절히 처리
+                    if "codex" in tool_name.lower() and "openai" in tool_name.lower():
+                        # Codex는 code_generation 기능에 특화되어 있음
+                        if not workflow_support or WorkflowType.CODE_GENERATION not in workflow_support:
+                            workflow_support = [WorkflowType.CODE_GENERATION] + workflow_support
+                        if feature_category != "code_review" and feature_category != "security_scan":
+                            feature_category = "code_generation"
+                    
                     tool_fact = ToolFact(
-                        name=fact_data["name"],
+                        name=tool_name,
                         pricing_plans=pricing_plans,
                         integrations=fact_data.get("integrations", []),
                         supported_languages=fact_data.get("supported_languages", []),

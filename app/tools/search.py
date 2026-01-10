@@ -127,13 +127,37 @@ class SearchWithFallback:
             research_cache.set(query, serper_result, domain="search", prefix="query")
             return serper_result
         
-        # 둘 다 실패
-        print(f"❌ [검색 실패] Tavily와 Serper 모두 실패")
+        # 둘 다 실패 시 다른 쿼리로 재시도 (최대 2번)
+        print(f"⚠️ [검색 실패] Tavily와 Serper 모두 실패, 다른 쿼리로 재시도...")
+        retry_queries = self._generate_retry_queries(query)
+        
+        for retry_query in retry_queries[:2]:  # 최대 2번만 재시도
+            if retry_query == query:
+                continue  # 원본 쿼리는 이미 시도했으므로 스킵
+            
+            print(f"🔄 [재시도] 쿼리 변형: {retry_query}")
+            
+            # Tavily로 재시도
+            tavily_retry = await self._search_tavily(retry_query, max_results, "basic")
+            if tavily_retry.get("success"):
+                print(f"✅ [재시도 성공] Tavily: {retry_query}")
+                research_cache.set(query, tavily_retry, domain="search", prefix="query")
+                return tavily_retry
+            
+            # Serper로 재시도
+            serper_retry = await self._search_serper(retry_query, max_results)
+            if serper_retry.get("success"):
+                print(f"✅ [재시도 성공] Serper: {retry_query}")
+                research_cache.set(query, serper_retry, domain="search", prefix="query")
+                return serper_retry
+        
+        # 모든 재시도 실패
+        print(f"❌ [검색 실패] 모든 쿼리와 엔진 실패")
         return {
             "source": "none",
             "results": [],
             "success": False,
-            "error": "모든 검색 엔진 실패",
+            "error": "모든 검색 엔진 및 재시도 실패",
             "query": query
         }
     
@@ -260,6 +284,12 @@ class SearchWithFallback:
         try:
             print(f"🔍 [Tavily] 검색 중 ({search_depth}): {query}")
             
+            # site: 검색에서 오류 발생 시 일반 검색으로 대체
+            original_query = query
+            if "site:" in query.lower():
+                # site: 검색을 시도하되, 오류 발생 시 일반 검색으로 대체
+                pass
+            
             # 타임아웃 설정: basic/intermediate는 8초, advanced는 12초
             timeout = 8.0 if search_depth in ["basic", "intermediate"] else 12.0
             
@@ -307,8 +337,53 @@ class SearchWithFallback:
             return {"success": False, "timeout": True}
         
         except Exception as e:
-            print(f"❌ [Tavily] 오류: {str(e)}")
+            error_str = str(e)
+            # 400, 432 오류는 site: 검색에서 자주 발생
+            # Tavily는 site: 검색을 잘 지원하지 않으므로, 실패 시 바로 Serper.dev로 넘어감
+            # (일반 검색으로 대체하면 특정 사이트 검색 의도가 사라지므로 의미 없음)
+            if ("site:" in query.lower()) and ("400" in error_str or "432" in error_str or "Bad Request" in error_str):
+                print(f"⚠️ [Tavily] site: 검색 오류 ({error_str[:50]}), Tavily는 site: 검색을 지원하지 않습니다. Serper.dev로 전환됩니다.")
+            print(f"❌ [Tavily] 오류: {error_str}")
             return {"success": False}
+    
+    def _generate_retry_queries(self, original_query: str) -> List[str]:
+        """검색 실패 시 재시도할 쿼리 목록 생성"""
+        retry_queries = []
+        
+        # 1. site: 제거하고 일반 검색
+        if "site:" in original_query.lower():
+            general_query = re.sub(r'site:\S+\s*', '', original_query, flags=re.IGNORECASE).strip()
+            if general_query and general_query != original_query:
+                retry_queries.append(general_query)
+        
+        # 2. 쿼리를 단순화 (특수 문자 제거, 키워드만 추출)
+        # 핵심 키워드 추출 (도구명, 핵심 개념)
+        keywords = re.findall(r'\b[A-Z][a-zA-Z]+\b', original_query)  # 대문자로 시작하는 단어
+        keywords.extend(re.findall(r'\b\w+\b', original_query.lower()))  # 모든 단어
+        
+        # 중복 제거 및 길이 기준 정리
+        keywords = [kw for kw in set(keywords) if len(kw) > 3 and kw.lower() not in ['site', 'pricing', 'features', 'integration']]
+        
+        if keywords:
+            # 핵심 키워드만으로 쿼리 생성 (최대 5개)
+            simplified = ' '.join(keywords[:5])
+            if simplified and simplified != original_query.lower():
+                retry_queries.append(simplified)
+            
+            # 도구명 + "pricing" 또는 "features" 조합
+            tool_names = [kw for kw in keywords[:3] if kw[0].isupper()]
+            if tool_names:
+                for suffix in ['pricing', 'features', 'review']:
+                    tool_query = f"{' '.join(tool_names)} {suffix}"
+                    if tool_query != original_query.lower():
+                        retry_queries.append(tool_query)
+        
+        # 3. 원본 쿼리의 연도 제거 (예: "2026" 제거)
+        year_removed = re.sub(r'\b20\d{2}\b', '', original_query).strip()
+        if year_removed and year_removed != original_query:
+            retry_queries.append(year_removed)
+        
+        return retry_queries
     
     async def _search_serper(
         self, 
