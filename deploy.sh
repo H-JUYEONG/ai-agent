@@ -46,8 +46,11 @@ docker compose rm -f app
 echo "🧹 불필요한 Docker 이미지 정리..."
 docker image prune -a -f
 
-# 6. 애플리케이션 이미지 빌드
+# 6. 애플리케이션 이미지 빌드 (빌드 ID로 캐시 무효화)
 echo "🔨 애플리케이션 이미지 빌드..."
+export BUILD_ID=$(date +%s)
+export BUILD_TIME=$(date -u +%Y%m%d-%H%M%S)
+echo "📅 Build ID: $BUILD_ID, Build Time: $BUILD_TIME"
 docker compose build --no-cache app
 
 # 7. 애플리케이션 컨테이너 시작

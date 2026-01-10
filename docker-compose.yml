@@ -26,7 +26,12 @@ services:
 
   # AI Agent 애플리케이션
   app:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        BUILD_ID: ${BUILD_ID:-}
+        BUILD_TIME: ${BUILD_TIME:-}
     container_name: ai-agent-app
     ports:
       - "8000:8000"
