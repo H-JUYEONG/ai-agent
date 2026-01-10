@@ -97,22 +97,9 @@ async def clarify_with_user(
     # 주제 검증 통과 → 이제 쿼리 정규화 및 캐시 조회 진행
     print(f"✅ [주제 검증] 주제 검증 통과 - 정상 프로세스 진행")
     
-    # ========== 🆕 답변 형식 요청 감지 ==========
-    # 사용자가 요청한 답변 형식 감지 (표, 테이블, 리스트 등)
-    response_format = None
-    last_user_message_lower = last_user_message.lower()
-    
-    if any(keyword in last_user_message_lower for keyword in ["표로 정리", "표로", "테이블로", "비교표", "표 형식", "표 형식으로"]):
-        response_format = "table"
-        print(f"🔍 [답변 형식] 테이블 형식 요청 감지")
-    elif any(keyword in last_user_message_lower for keyword in ["리스트로", "목록으로", "리스트 형식", "목록 형식"]):
-        response_format = "list"
-        print(f"🔍 [답변 형식] 리스트 형식 요청 감지")
-    else:
-        response_format = "markdown"  # 기본값
-        print(f"🔍 [답변 형식] 마크다운 형식 (기본값)")
-    
     # ========== 🆕 1단계: 쿼리 정규화 (캐시 키 생성) ==========
+    # 🚨 중요: 캐시 조회를 먼저 하고, 캐시에서 못 찾으면 response_format 감지
+    # 캐시에서 가져올 때는 response_format을 무시하고 저장된 내용 그대로 반환
     model_config = {
         "model": configurable.research_model,
         "max_tokens": 200,  # 정규화는 짧게
@@ -200,75 +187,108 @@ async def clarify_with_user(
         
         if cached_answer:
             # 캐시된 답변 처리
-            cached_content = cached_answer["content"]
+            cached_content = cached_answer.get("content", "")
             
-            print(f"🔍 [캐시 처리] 캐시된 답변 길이: {len(cached_content)}자, is_followup: {is_followup}")
-            print(f"🔍 [캐시 처리] 캐시된 답변 시작 100자: {cached_content[:100]}")
+            # 🚨 JSON 형식(표 형식) 체크 및 필터링
+            # 캐시에 JSON 형식이 저장되어 있으면 무시하고 새로 생성
+            import json
+            is_json_format = False
+            try:
+                # JSON 형식인지 확인 (표 형식 데이터)
+                if cached_content.strip().startswith('{') or cached_content.strip().startswith('['):
+                    json_data = json.loads(cached_content)
+                    if isinstance(json_data, dict) and "type" in json_data and json_data.get("type") == "table":
+                        is_json_format = True
+                        print(f"⚠️ [캐시 무시] 캐시에 JSON 형식(표 형식)이 저장되어 있음 - 캐시 무시하고 새로 생성")
+                        cached_answer = None  # JSON 형식이면 캐시 무시
+            except (json.JSONDecodeError, ValueError, TypeError):
+                # JSON 형식이 아니면 정상 처리
+                pass
             
-            # 리포트 본문 추출 (캐시에는 리포트 본문만 저장되어 있음)
-            report_body = cached_content.strip()
-            
-            # 🚨 [GREETING] 태그가 있으면 제거하고 리포트 본문만 추출
-            # 인사 멘트는 캐시에서 가져오지 않고 항상 새로 생성
-            if "[GREETING]" in cached_content and "[/GREETING]" in cached_content:
-                match = re.search(r'\[GREETING\](.*?)\[/GREETING\]', cached_content, re.DOTALL)
-                if match:
-                    # 인사말 태그 제거하고 리포트 본문만 추출
-                    report_body = cached_content.replace(match.group(0), "").strip()
-                    print(f"✅ [캐시] [GREETING] 태그 제거 후 리포트 본문 추출: {len(report_body)}자")
-            
-            # 리포트 본문이 비어있거나 너무 짧으면 원본 사용
-            if not report_body or len(report_body) < 50:
-                print(f"⚠️ [캐시 처리] 리포트 본문이 비어있음 - 원본 캐시 내용 사용")
+            if cached_answer and not is_json_format:
+                print(f"🔍 [캐시 처리] 캐시된 답변 길이: {len(cached_content)}자, is_followup: {is_followup}")
+                print(f"🔍 [캐시 처리] 캐시된 답변 시작 100자: {cached_content[:100]}")
+                
+                # 리포트 본문 추출 (캐시에는 리포트 본문만 저장되어 있음)
                 report_body = cached_content.strip()
-            
-            # 🚨 캐시 검증: 리포트 본문이 유효한지 확인
-            # 리포트가 너무 짧거나(200자 미만) 비어있으면 캐시 무시
-            if len(report_body) < 200:
-                print(f"⚠️ [캐시 무시] 리포트 본문이 너무 짧음 ({len(report_body)}자). 캐시 무시하고 새로 생성")
-                # pass - 캐시를 사용하지 않고 아래 연구 프로세스로 진행
-            else:
-                # 🚨 인사 멘트는 항상 LLM으로 동적 생성 (공통 함수 사용)
-                print(f"✅ [캐시 처리] 리포트 본문은 캐시에서 가져옴 ({len(report_body)}자), 인사 멘트는 LLM으로 동적 생성")
                 
-                greeting = await generate_greeting_dynamically(messages, config, is_followup)
-                if not greeting or len(greeting) < 20:
-                    # LLM 생성 실패 시 질문 기반 최소 생성
-                    if last_user_message:
-                        greeting = f"{last_user_message[:50]}에 대해 분석해드리겠습니다."
-                    else:
-                        greeting = "분석해드리겠습니다."
-                    print(f"⚠️ [캐시 처리] LLM 멘트 생성 실패 또는 너무 짧음, fallback 사용: '{greeting}'")
-                print(f"✅ [캐시 처리] 리포트 본문 길이: {len(report_body)}자, 시작 100자: {report_body[:100]}")
+                # 🚨 [GREETING] 태그가 있으면 제거하고 리포트 본문만 추출
+                # 인사 멘트는 캐시에서 가져오지 않고 항상 새로 생성
+                if "[GREETING]" in cached_content and "[/GREETING]" in cached_content:
+                    match = re.search(r'\[GREETING\](.*?)\[/GREETING\]', cached_content, re.DOTALL)
+                    if match:
+                        # 인사말 태그 제거하고 리포트 본문만 추출
+                        report_body = cached_content.replace(match.group(0), "").strip()
+                        print(f"✅ [캐시] [GREETING] 태그 제거 후 리포트 본문 추출: {len(report_body)}자")
                 
-                return Command(
-                    goto=END,
-                    update={"messages": [
-                        AIMessage(content=greeting),
-                        AIMessage(content=report_body)
-                    ]}
-                )
+                # 리포트 본문이 비어있거나 너무 짧으면 원본 사용
+                if not report_body or len(report_body) < 50:
+                    print(f"⚠️ [캐시 처리] 리포트 본문이 비어있음 - 원본 캐시 내용 사용")
+                    report_body = cached_content.strip()
+                
+                # 🚨 캐시 검증: 리포트 본문이 유효한지 확인
+                # 리포트가 너무 짧거나(200자 미만) 비어있으면 캐시 무시
+                if len(report_body) < 200:
+                    print(f"⚠️ [캐시 무시] 리포트 본문이 너무 짧음 ({len(report_body)}자). 캐시 무시하고 새로 생성")
+                    cached_answer = None  # 캐시 무시
+                else:
+                    # 🚨 인사 멘트는 항상 LLM으로 동적 생성 (공통 함수 사용)
+                    print(f"✅ [캐시 처리] 리포트 본문은 캐시에서 가져옴 ({len(report_body)}자), 인사 멘트는 LLM으로 동적 생성")
+                    
+                    greeting = await generate_greeting_dynamically(messages, config, is_followup)
+                    if not greeting or len(greeting) < 20:
+                        # LLM 생성 실패 시 질문 기반 최소 생성
+                        if last_user_message:
+                            greeting = f"{last_user_message[:50]}에 대해 분석해드리겠습니다."
+                        else:
+                            greeting = "분석해드리겠습니다."
+                        print(f"⚠️ [캐시 처리] LLM 멘트 생성 실패 또는 너무 짧음, fallback 사용: '{greeting}'")
+                    print(f"✅ [캐시 처리] 리포트 본문 길이: {len(report_body)}자, 시작 100자: {report_body[:100]}")
+                    
+                    return Command(
+                        goto=END,
+                        update={"messages": [
+                            AIMessage(content=greeting),
+                            AIMessage(content=report_body)
+                        ]}
+                    )
     
     print(f"⚠️ [캐시 MISS] 정규화된 쿼리: '{normalized['normalized_text']}' (키워드: {normalized['keywords']})")
     
     # ========== 🆕 3단계: 벡터 DB로 유사 질문 검색 ==========
     # 캐시 미스 시 유사한 질문이 있는지 벡터 DB에서 검색
-    # 1차: 정규화된 텍스트로 검색 (동일한 의미의 질문이 정규화되어 저장되어 있을 가능성)
+    # 🚨 중요: 원본 질문을 먼저 검색하고, 그 다음 정규화된 텍스트로 검색
+    # 동일하거나 유사한 질문은 원본 질문으로 먼저 찾을 가능성이 높음
+    
+    # 1차: 원본 질문으로 검색 (동일 질문 또는 매우 유사한 질문 발견 가능)
     similar_query = vector_store.search_similar_query(
-        query=normalized['normalized_text'],
+        query=last_user_message,
         domain=domain,
         limit=1,
-        score_threshold=0.75  # 정규화된 텍스트는 더 유사할 가능성
+        score_threshold=0.70  # 유사 질문 감지율 향상 (0.75 → 0.70)
     )
     
-    # 2차: 정규화된 텍스트로 못 찾으면 원본 질문으로 검색
+    # 2차: 원본 질문으로 못 찾으면 정규화된 텍스트로 검색
     if not similar_query or not similar_query.get("cache_key"):
         similar_query = vector_store.search_similar_query(
-            query=last_user_message,
+            query=normalized['normalized_text'],
             domain=domain,
             limit=1,
-            score_threshold=0.75  # 유사 질문 감지율 향상을 위해 임계값 조정 (0.85 → 0.75)
+            score_threshold=0.70  # 정규화된 텍스트도 동일한 임계값 사용
         )
+    
+    # 3차: 여전히 못 찾으면 더 낮은 임계값으로 재시도
+    if not similar_query or not similar_query.get("cache_key"):
+        # 원본 질문과 정규화된 텍스트 모두 더 낮은 임계값으로 재시도
+        for query_variant in [last_user_message, normalized['normalized_text']]:
+            similar_query = vector_store.search_similar_query(
+                query=query_variant,
+                domain=domain,
+                limit=1,
+                score_threshold=0.65  # 더 낮은 임계값으로 재시도
+            )
+            if similar_query and similar_query.get("cache_key"):
+                break
     
     if similar_query and similar_query.get("cache_key"):
         similar_cache_key = similar_query["cache_key"]
@@ -293,7 +313,22 @@ async def clarify_with_user(
             if not report_body or len(report_body) < 50:
                 report_body = cached_content.strip()
             
-            if len(report_body) >= 200:
+            # 🚨 JSON 형식(표 형식) 체크 및 필터링
+            import json
+            is_json_format = False
+            try:
+                # JSON 형식인지 확인 (표 형식 데이터)
+                if report_body.strip().startswith('{') or report_body.strip().startswith('['):
+                    json_data = json.loads(report_body)
+                    if isinstance(json_data, dict) and "type" in json_data and json_data.get("type") == "table":
+                        is_json_format = True
+                        print(f"⚠️ [유사 질문 캐시 무시] 캐시에 JSON 형식(표 형식)이 저장되어 있음 - 캐시 무시하고 새로 생성")
+                        cached_answer = None
+            except (json.JSONDecodeError, ValueError, TypeError):
+                # JSON 형식이 아니면 정상 처리
+                pass
+            
+            if cached_answer and not is_json_format and len(report_body) >= 200:
                 # 인사 멘트 생성 (LLM으로 동적 생성)
                 print(f"✅ [유사 질문 처리] 리포트 본문은 캐시에서 가져옴 ({len(report_body)}자), 인사 멘트는 LLM으로 동적 생성")
                 
@@ -315,8 +350,24 @@ async def clarify_with_user(
                 )
     
     # 캐시 미스 및 유사 질문도 없음 → 새로 생성
-    # 주제 검증은 이미 위(라인 138-147)에서 완료되었으므로 response를 재사용
+    # 주제 검증은 이미 위(라인 69)에서 완료되었으므로 response를 재사용
     print(f"⚠️ [캐시 MISS + 유사 질문 없음] 새로 생성 진행 (주제 검증 완료)")
+    
+    # ========== 🆕 답변 형식 요청 감지 (캐시 미스 시에만) ==========
+    # 사용자가 요청한 답변 형식 감지 (표, 테이블, 리스트 등)
+    # 🚨 중요: 캐시에서 가져온 경우는 response_format을 무시하므로, 여기서만 감지
+    response_format = None
+    last_user_message_lower = last_user_message.lower()
+    
+    if any(keyword in last_user_message_lower for keyword in ["표로 정리", "표로", "테이블로", "비교표", "표 형식", "표 형식으로"]):
+        response_format = "table"
+        print(f"🔍 [답변 형식] 테이블 형식 요청 감지")
+    elif any(keyword in last_user_message_lower for keyword in ["리스트로", "목록으로", "리스트 형식", "목록 형식"]):
+        response_format = "list"
+        print(f"🔍 [답변 형식] 리스트 형식 요청 감지")
+    else:
+        response_format = "markdown"  # 기본값
+        print(f"🔍 [답변 형식] 마크다운 형식 (기본값)")
     
     # 🆕 검색 필요 여부 체크 (Follow-up 질문인 경우)
     need_research = getattr(response, 'need_research', True)  # 기본값: True (검색 필요)
@@ -332,12 +383,10 @@ async def clarify_with_user(
                 "need_research": False  # 🆕 재검색 불필요 플래그 저장 (캐시/벡터 DB 저장 건너뛰기용)
             }
         )
-        print(f"✅ [검색 불필요] state에 response_format='{response_format}' 저장 완료")
     
     # 명확화 비활성화 시 바로 다음 단계로 (주제 검증은 이미 완료됨)
     if not configurable.allow_clarification:
         print(f"✅ [DEBUG] 주제 검증 통과 - 바로 연구 시작")
-        print(f"✅ [명확화 비활성화] state에 response_format='{response_format}' 저장 완료")
         return Command(
             goto="write_research_brief",
             update={
@@ -355,7 +404,6 @@ async def clarify_with_user(
             update={"messages": [AIMessage(content=response.question)]}
         )
     else:
-        print(f"✅ [검색 필요] state에 response_format='{response_format}' 저장 완료")
         return Command(
             goto="write_research_brief",
             update={

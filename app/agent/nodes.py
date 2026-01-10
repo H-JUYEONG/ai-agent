@@ -51,6 +51,7 @@ from app.tools.search import searcher
 from app.tools.vector_store import vector_store
 from app.tools.query_normalizer import query_normalizer
 from app.tools.cache import research_cache
+from app.agent.nodes.writer import generate_greeting_dynamically
 
 # 설정 가능한 모델
 configurable_model = init_chat_model(
@@ -205,33 +206,50 @@ async def clarify_with_user(
         
         if cached_answer:
             # 캐시된 답변 처리
-            cached_content = cached_answer["content"]
+            cached_content = cached_answer.get("content", "")
             
-            print(f"🔍 [캐시 처리] 캐시된 답변 길이: {len(cached_content)}자, is_followup: {is_followup}")
-            print(f"🔍 [캐시 처리] 캐시된 답변 시작 100자: {cached_content[:100]}")
+            # 🚨 JSON 형식(표 형식) 체크 및 필터링
+            # 캐시에 JSON 형식이 저장되어 있으면 무시하고 새로 생성
+            import json
+            is_json_format = False
+            try:
+                # JSON 형식인지 확인 (표 형식 데이터)
+                if cached_content.strip().startswith('{') or cached_content.strip().startswith('['):
+                    json_data = json.loads(cached_content)
+                    if isinstance(json_data, dict) and "type" in json_data and json_data.get("type") == "table":
+                        is_json_format = True
+                        print(f"⚠️ [캐시 무시] 캐시에 JSON 형식(표 형식)이 저장되어 있음 - 캐시 무시하고 새로 생성")
+                        cached_answer = None  # JSON 형식이면 캐시 무시
+            except (json.JSONDecodeError, ValueError, TypeError):
+                # JSON 형식이 아니면 정상 처리
+                pass
             
-            # 리포트 본문 추출 (캐시에는 리포트 본문만 저장되어 있음)
-            report_body = cached_content.strip()
-            
-            # 🚨 [GREETING] 태그가 있으면 제거하고 리포트 본문만 추출
-            # 인사 멘트는 캐시에서 가져오지 않고 항상 새로 생성
-            if "[GREETING]" in cached_content and "[/GREETING]" in cached_content:
-                match = re.search(r'\[GREETING\](.*?)\[/GREETING\]', cached_content, re.DOTALL)
-                if match:
-                    # 인사말 태그 제거하고 리포트 본문만 추출
-                    report_body = cached_content.replace(match.group(0), "").strip()
-                    print(f"✅ [캐시] [GREETING] 태그 제거 후 리포트 본문 추출: {len(report_body)}자")
-            
-            # 리포트 본문이 비어있거나 너무 짧으면 원본 사용
-            if not report_body or len(report_body) < 50:
-                print(f"⚠️ [캐시 처리] 리포트 본문이 비어있음 - 원본 캐시 내용 사용")
+            if cached_answer and not is_json_format:
+                print(f"🔍 [캐시 처리] 캐시된 답변 길이: {len(cached_content)}자, is_followup: {is_followup}")
+                print(f"🔍 [캐시 처리] 캐시된 답변 시작 100자: {cached_content[:100]}")
+                
+                # 리포트 본문 추출 (캐시에는 리포트 본문만 저장되어 있음)
                 report_body = cached_content.strip()
-            
-            # 🚨 캐시 검증: 리포트 본문이 유효한지 확인
-            # 리포트가 너무 짧거나(200자 미만) 비어있으면 캐시 무시
-            if len(report_body) < 200:
-                print(f"⚠️ [캐시 무시] 리포트 본문이 너무 짧음 ({len(report_body)}자). 캐시 무시하고 새로 생성")
-                # pass - 캐시를 사용하지 않고 아래 연구 프로세스로 진행
+                
+                # 🚨 [GREETING] 태그가 있으면 제거하고 리포트 본문만 추출
+                # 인사 멘트는 캐시에서 가져오지 않고 항상 새로 생성
+                if "[GREETING]" in cached_content and "[/GREETING]" in cached_content:
+                    match = re.search(r'\[GREETING\](.*?)\[/GREETING\]', cached_content, re.DOTALL)
+                    if match:
+                        # 인사말 태그 제거하고 리포트 본문만 추출
+                        report_body = cached_content.replace(match.group(0), "").strip()
+                        print(f"✅ [캐시] [GREETING] 태그 제거 후 리포트 본문 추출: {len(report_body)}자")
+                
+                # 리포트 본문이 비어있거나 너무 짧으면 원본 사용
+                if not report_body or len(report_body) < 50:
+                    print(f"⚠️ [캐시 처리] 리포트 본문이 비어있음 - 원본 캐시 내용 사용")
+                    report_body = cached_content.strip()
+                
+                # 🚨 캐시 검증: 리포트 본문이 유효한지 확인
+                # 리포트가 너무 짧거나(200자 미만) 비어있으면 캐시 무시
+                if len(report_body) < 200:
+                    print(f"⚠️ [캐시 무시] 리포트 본문이 너무 짧음 ({len(report_body)}자). 캐시 무시하고 새로 생성")
+                    cached_answer = None  # 캐시 무시
             else:
                 # 🚨 인사 멘트는 항상 새로 생성 (캐시에서 가져오지 않음)
                 # final_report_generation과 동일한 방식으로 인사 멘트 생성 (동일한 모델, 동일한 프롬프트 스타일)
@@ -363,22 +381,38 @@ async def clarify_with_user(
     
     # ========== 🆕 3단계: 벡터 DB로 유사 질문 검색 ==========
     # 캐시 미스 시 유사한 질문이 있는지 벡터 DB에서 검색
-    # 1차: 정규화된 텍스트로 검색 (동일한 의미의 질문이 정규화되어 저장되어 있을 가능성)
+    # 🚨 중요: 원본 질문을 먼저 검색하고, 그 다음 정규화된 텍스트로 검색
+    # 동일하거나 유사한 질문은 원본 질문으로 먼저 찾을 가능성이 높음
+    
+    # 1차: 원본 질문으로 검색 (동일 질문 또는 매우 유사한 질문 발견 가능)
     similar_query = vector_store.search_similar_query(
-        query=normalized['normalized_text'],
+        query=last_user_message,
         domain=domain,
         limit=1,
-        score_threshold=0.75  # 정규화된 텍스트는 더 유사할 가능성
+        score_threshold=0.70  # 유사 질문 감지율 향상 (0.75 → 0.70)
     )
     
-    # 2차: 정규화된 텍스트로 못 찾으면 원본 질문으로 검색
+    # 2차: 원본 질문으로 못 찾으면 정규화된 텍스트로 검색
     if not similar_query or not similar_query.get("cache_key"):
         similar_query = vector_store.search_similar_query(
-            query=last_user_message,
+            query=normalized['normalized_text'],
             domain=domain,
             limit=1,
-            score_threshold=0.75  # 유사 질문 감지율 향상을 위해 임계값 조정 (0.85 → 0.75)
+            score_threshold=0.70  # 정규화된 텍스트도 동일한 임계값 사용
         )
+    
+    # 3차: 여전히 못 찾으면 더 낮은 임계값으로 재시도
+    if not similar_query or not similar_query.get("cache_key"):
+        # 원본 질문과 정규화된 텍스트 모두 더 낮은 임계값으로 재시도
+        for query_variant in [last_user_message, normalized['normalized_text']]:
+            similar_query = vector_store.search_similar_query(
+                query=query_variant,
+                domain=domain,
+                limit=1,
+                score_threshold=0.65  # 더 낮은 임계값으로 재시도
+            )
+            if similar_query and similar_query.get("cache_key"):
+                break
     
     if similar_query and similar_query.get("cache_key"):
         similar_cache_key = similar_query["cache_key"]
@@ -391,76 +425,49 @@ async def clarify_with_user(
             print(f"✅ [유사 질문 캐시 HIT] 최종 답변 반환 (유사 질문의 캐시 키: {similar_cache_key[:16]}...)")
             
             # 리포트 본문 추출 및 인사 멘트 생성 (기존 로직과 동일)
-            cached_content = cached_answer["content"]
-            report_body = cached_content.strip()
+            cached_content = cached_answer.get("content", "")
             
-            # [GREETING] 태그 제거
-            if "[GREETING]" in cached_content and "[/GREETING]" in cached_content:
-                match = re.search(r'\[GREETING\](.*?)\[/GREETING\]', cached_content, re.DOTALL)
-                if match:
-                    report_body = cached_content.replace(match.group(0), "").strip()
+            # 🚨 JSON 형식(표 형식) 체크 및 필터링
+            import json
+            is_json_format = False
+            try:
+                # JSON 형식인지 확인 (표 형식 데이터)
+                if cached_content.strip().startswith('{') or cached_content.strip().startswith('['):
+                    json_data = json.loads(cached_content)
+                    if isinstance(json_data, dict) and "type" in json_data and json_data.get("type") == "table":
+                        is_json_format = True
+                        print(f"⚠️ [유사 질문 캐시 무시] 캐시에 JSON 형식(표 형식)이 저장되어 있음 - 캐시 무시하고 새로 생성")
+                        cached_answer = None
+            except (json.JSONDecodeError, ValueError, TypeError):
+                # JSON 형식이 아니면 정상 처리
+                pass
             
-            if not report_body or len(report_body) < 50:
+            if cached_answer and not is_json_format:
                 report_body = cached_content.strip()
-            
-            if len(report_body) >= 200:
-                # 인사 멘트 생성 (기존 로직과 동일)
-                print(f"✅ [유사 질문 처리] 리포트 본문은 캐시에서 가져옴 ({len(report_body)}자), 인사 멘트는 새로 생성")
                 
-                # final_report_generation과 동일한 방식으로 인사 멘트 생성
-                # 모델별 max_tokens 제한 확인 및 적용
-                model_name_greeting2 = configurable.final_report_model.lower()
-                if "gpt-4o-mini" in model_name_greeting2:
-                    greeting_max_tokens2 = min(configurable.final_report_model_max_tokens, 16384)  # gpt-4o-mini 최대 16384
-                elif "gpt-4o" in model_name_greeting2 and "mini" not in model_name_greeting2:
-                    greeting_max_tokens2 = min(configurable.final_report_model_max_tokens, 16384)  # gpt-4o 최대 16384
-                elif "gpt-4" in model_name_greeting2:
-                    greeting_max_tokens2 = min(configurable.final_report_model_max_tokens, 4096)  # gpt-4 최대 4096
-                else:
-                    greeting_max_tokens2 = min(configurable.final_report_model_max_tokens, 16384)  # 기본값
+                # [GREETING] 태그 제거
+                if "[GREETING]" in cached_content and "[/GREETING]" in cached_content:
+                    match = re.search(r'\[GREETING\](.*?)\[/GREETING\]', cached_content, re.DOTALL)
+                    if match:
+                        report_body = cached_content.replace(match.group(0), "").strip()
                 
-                greeting_model_config = {
-                    "model": configurable.final_report_model,
-                    "max_tokens": greeting_max_tokens2,
-                    "api_key": get_api_key_for_model(configurable.final_report_model, config),
-                }
+                if not report_body or len(report_body) < 50:
+                    report_body = cached_content.strip()
                 
-                messages_context = get_buffer_string(messages) if messages else last_user_message
-                
-                greeting_prompt = f"""당신은 코딩 AI 도구 추천 전문가입니다. 사용자 질문에 맞는 자연스럽고 상세한 인사 멘트를 생성하세요.
-
-사용자 메시지:
-{messages_context}
-
-**원칙:**
-- 사용자의 현재 질문 내용과 의도를 정확히 파악하여 그에 맞는 자연스러운 멘트를 생성
-- 질문의 핵심 키워드(팀 규모, 목적, 요구사항, 도메인 등)를 반영
-- 질문에 언급된 구체적인 내용(팀 규모, 목적, 요구사항 등)을 반드시 포함
-- 자연스럽고 친절한 톤 유지
-- 적절한 길이 (40-100자 정도, 너무 짧지 않게)
-
-인사 멘트만 출력하세요 ([GREETING] 태그 없이, 다른 설명 없이):"""
-                
-                try:
-                    greeting_model = configurable_model.with_config(greeting_model_config)
-                    greeting_response = await greeting_model.ainvoke([HumanMessage(content=greeting_prompt)])
-                    greeting = str(greeting_response.content).strip().strip('"\'`').strip()
+                if len(report_body) >= 200:
+                    # 인사 멘트 생성 (LLM으로 동적 생성)
+                    print(f"✅ [유사 질문 처리] 리포트 본문은 캐시에서 가져옴 ({len(report_body)}자), 인사 멘트는 LLM으로 동적 생성")
                     
-                    if not greeting or len(greeting) < 30:
-                        greeting = f"네! {last_user_message[:30]}에 대해 조사해드리겠습니다."
+                    # final_report_generation과 동일한 방식으로 인사 멘트 생성 (공통 함수 사용)
+                    greeting = await generate_greeting_dynamically(messages, config, is_followup)
+                    if not greeting or len(greeting) < 20:
+                        # LLM 생성 실패 시 질문 기반 최소 생성
+                        if last_user_message:
+                            greeting = f"{last_user_message[:50]}에 대해 분석해드리겠습니다."
+                        else:
+                            greeting = "분석해드리겠습니다."
+                        print(f"⚠️ [유사 질문 처리] LLM 멘트 생성 실패 또는 너무 짧음, fallback 사용: '{greeting}'")
                     
-                    print(f"✅ [유사 질문 처리] 인사 멘트 생성 완료: '{greeting}'")
-                    
-                    return Command(
-                        goto=END,
-                        update={"messages": [
-                            AIMessage(content=greeting),
-                            AIMessage(content=report_body)
-                        ]}
-                    )
-                except Exception as e:
-                    print(f"⚠️ [유사 질문 처리] 인사 멘트 생성 실패: {e}")
-                    greeting = f"네! {last_user_message[:30]}에 대해 조사해드리겠습니다."
                     return Command(
                         goto=END,
                         update={"messages": [

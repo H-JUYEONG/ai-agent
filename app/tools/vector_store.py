@@ -363,40 +363,66 @@ class VectorStore:
         # 컬렉션이 없으면 자동 생성 시도
         self._ensure_query_collection()
         
-        # Point 먼저 생성 (예외 발생 지점 분리)
+        # Points 리스트 생성 (원본 질문 + 정규화된 텍스트 각각 저장)
+        points = []
+        expire_timestamp = int((datetime.now() + timedelta(days=ttl_days)).timestamp())
+        
         try:
-            # 질문 임베딩 생성
+            # 1. 원본 질문 임베딩 및 저장
             query_embedding = self.embedding_model.encode(query).tolist()
-            
-            # 메타데이터 구성
-            expire_timestamp = int((datetime.now() + timedelta(days=ttl_days)).timestamp())
-            payload = {
+            query_payload = {
                 "query": query,
                 "cache_key": cache_key,
                 "normalized_text": normalized_text,
                 "domain": domain,
+                "query_type": "original",  # 원본 질문임을 표시
                 "created_at": int(datetime.now().timestamp()),
                 "expire_at": expire_timestamp
             }
-            
-            # Point 생성
-            point_id = self._generate_id(query, cache_key)
-            point = PointStruct(
-                id=point_id,
+            query_point_id = self._generate_id(query, cache_key)
+            points.append(PointStruct(
+                id=query_point_id,
                 vector=query_embedding,
-                payload=payload
-            )
+                payload=query_payload
+            ))
+            
+            # 2. 정규화된 텍스트가 있고 원본과 다르면 별도로 저장
+            if normalized_text and normalized_text != query and normalized_text.strip():
+                normalized_embedding = self.embedding_model.encode(normalized_text).tolist()
+                normalized_payload = {
+                    "query": normalized_text,
+                    "cache_key": cache_key,
+                    "normalized_text": normalized_text,
+                    "domain": domain,
+                    "query_type": "normalized",  # 정규화된 텍스트임을 표시
+                    "original_query": query,  # 원본 질문 참조
+                    "created_at": int(datetime.now().timestamp()),
+                    "expire_at": expire_timestamp
+                }
+                # 정규화된 텍스트의 고유 ID (원본과 구분)
+                normalized_point_id = self._generate_id(f"normalized:{normalized_text}", cache_key)
+                points.append(PointStruct(
+                    id=normalized_point_id,
+                    vector=normalized_embedding,
+                    payload=normalized_payload
+                ))
+                print(f"✅ 질문-캐시 키 매핑 저장 (원본 + 정규화): '{query[:50]}...' + '{normalized_text[:50]}...' → {cache_key[:8]}...")
+            else:
+                print(f"✅ 질문-캐시 키 매핑 저장 (원본만): '{query[:50]}...' → {cache_key[:8]}...")
+            
         except Exception as e:
             print(f"❌ 질문 임베딩 생성 실패: {e}")
+            return False
+        
+        if not points:
             return False
         
         # Upsert 시도
         try:
             self.client.upsert(
                 collection_name=self.query_collection_name,
-                points=[point]
+                points=points
             )
-            print(f"✅ 질문-캐시 키 매핑 저장: '{query[:50]}...' → {cache_key[:8]}...")
             return True
         
         except Exception as e:
@@ -409,7 +435,7 @@ class VectorStore:
                     # 재시도
                     self.client.upsert(
                         collection_name=self.query_collection_name,
-                        points=[point]
+                        points=points
                     )
                     print(f"✅ 질문-캐시 키 매핑 저장 완료 (재시도 성공): '{query[:50]}...'")
                     return True
@@ -425,7 +451,7 @@ class VectorStore:
         query: str,
         domain: str = "general",
         limit: int = 1,
-        score_threshold: float = 0.85  # 높은 유사도만 (85% 이상)
+        score_threshold: float = 0.70  # 유사 질문 감지율 향상을 위해 임계값 완화 (0.85 → 0.70)
     ) -> Optional[Dict[str, Any]]:
         """
         유사한 질문 검색 (기존 캐시 키 찾기)

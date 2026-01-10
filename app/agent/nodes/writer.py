@@ -519,16 +519,40 @@ async def final_report_generation(state: AgentState, config: RunnableConfig):
         # 이전 대화 정보만 사용한 경우이므로 새로운 캐시가 필요 없음
         need_research = state.get("need_research", True)  # 기본값: True (검색 필요)
         
-        if need_research:
+        # 🚨 JSON 형식(표 형식) 체크 - JSON 형식이면 캐시에 저장하지 않음
+        response_format = state.get("response_format", "markdown")
+        import json
+        is_json_format = False
+        try:
+            # JSON 형식인지 확인 (표 형식 데이터)
+            if report_content.strip().startswith('{') or report_content.strip().startswith('['):
+                json_data = json.loads(report_content)
+                if isinstance(json_data, dict) and "type" in json_data and json_data.get("type") == "table":
+                    is_json_format = True
+                    print(f"⚠️ [캐시 저장 건너뛰기] JSON 형식(표 형식)은 캐시에 저장하지 않음 (response_format='{response_format}')")
+        except (json.JSONDecodeError, ValueError, TypeError):
+            # JSON 형식이 아니면 정상 처리
+            pass
+        
+        if need_research and not is_json_format and response_format != "table":
             normalized_query = state.get("normalized_query", {})
             print(f"🔍 [DEBUG] final_report - normalized_query: {normalized_query}")
             
             if normalized_query and normalized_query.get("cache_key"):
                 cache_key = normalized_query["cache_key"]
                 print(f"💾 [캐시 저장] 정규화: '{normalized_query.get('normalized_text', '')}' → 캐시키: {cache_key[:16]}...")
+                
+                # 🚨 캐시 저장 전에 [GREETING] 태그 제거 (리포트 본문만 저장)
+                content_to_cache = report_content.strip()
+                if "[GREETING]" in content_to_cache and "[/GREETING]" in content_to_cache:
+                    match = re.search(r'\[GREETING\](.*?)\[/GREETING\]', content_to_cache, re.DOTALL)
+                    if match:
+                        content_to_cache = content_to_cache.replace(match.group(0), "").strip()
+                        print(f"✅ [캐시 저장] [GREETING] 태그 제거 후 리포트 본문만 저장: {len(content_to_cache)}자")
+                
                 research_cache.set(
                     cache_key,
-                    {"content": report_content},
+                    {"content": content_to_cache},
                     domain=domain,
                     prefix="final"
                 )
@@ -551,7 +575,10 @@ async def final_report_generation(state: AgentState, config: RunnableConfig):
             else:
                 print(f"⚠️ [캐시 저장 실패] normalized_query 없음: {normalized_query}")
         else:
-            print(f"✅ [캐시 저장 건너뛰기] 재검색 불필요 (need_research = false) - 이전 대화 정보만 사용했으므로 저장하지 않음")
+            if not need_research:
+                print(f"✅ [캐시 저장 건너뛰기] 재검색 불필요 (need_research = false) - 이전 대화 정보만 사용했으므로 저장하지 않음")
+            elif is_json_format or response_format == "table":
+                print(f"✅ [캐시 저장 건너뛰기] JSON 형식(표 형식)은 캐시에 저장하지 않음 - 사용자가 명시적으로 요청한 형식이므로 매번 새로 생성")
         
         # 마크다운 코드 블록 제거 (```로 시작하고 끝나는 경우)
         # 단, 표 형식이 포함된 경우는 보존 (표 형식이 손상될 수 있음)
@@ -1431,21 +1458,63 @@ async def structured_report_generation(state: AgentState, config: RunnableConfig
         # 🚨 재검색이 필요 없는 경우(need_research = false)에는 캐시/벡터 DB 저장 건너뛰기
         need_research = state.get("need_research", True)  # 기본값: True (검색 필요)
         
-        if need_research:
+        # 🚨 JSON 형식(표 형식) 체크 - JSON 형식이면 캐시에 저장하지 않음
+        response_format = state.get("response_format", "markdown")
+        import json
+        is_json_format = False
+        try:
+            # JSON 형식인지 확인 (표 형식 데이터)
+            if report_body.strip().startswith('{') or report_body.strip().startswith('['):
+                json_data = json.loads(report_body)
+                if isinstance(json_data, dict) and "type" in json_data and json_data.get("type") == "table":
+                    is_json_format = True
+                    print(f"⚠️ [캐시 저장 건너뛰기] JSON 형식(표 형식)은 캐시에 저장하지 않음 (response_format='{response_format}')")
+        except (json.JSONDecodeError, ValueError, TypeError):
+            # JSON 형식이 아니면 정상 처리
+            pass
+        
+        if need_research and not is_json_format and response_format != "table":
             # 캐시 저장 (기존 로직과 동일)
             normalized_query = state.get("normalized_query", {})
             domain = state.get("domain", "AI 서비스")
             if normalized_query and normalized_query.get("cache_key"):
                 cache_key = normalized_query["cache_key"]
+                
+                # 🚨 캐시 저장 전에 [GREETING] 태그 제거 (리포트 본문만 저장)
+                content_to_cache = report_body.strip()
+                if "[GREETING]" in content_to_cache and "[/GREETING]" in content_to_cache:
+                    match = re.search(r'\[GREETING\](.*?)\[/GREETING\]', content_to_cache, re.DOTALL)
+                    if match:
+                        content_to_cache = content_to_cache.replace(match.group(0), "").strip()
+                        print(f"✅ [캐시 저장] [GREETING] 태그 제거 후 리포트 본문만 저장: {len(content_to_cache)}자")
+                
                 research_cache.set(
                     cache_key,
-                    {"content": report_body},
+                    {"content": content_to_cache},
                     domain=domain,
                     prefix="final"
                 )
                 print(f"✅ [캐시 저장] 구조화된 리포트 저장 완료")
+                
+                # ========== 🆕 질문-캐시 키 매핑을 벡터 DB에 저장 (유사 질문 검색용) ==========
+                messages_list = state.get("messages", [])
+                last_user_message = messages_list[-1].content if messages_list and isinstance(messages_list[-1], HumanMessage) else ""
+                
+                if last_user_message:
+                    # _common.py에서 이미 import한 vector_store 사용
+                    vector_store.add_query_mapping(
+                        query=last_user_message,
+                        cache_key=cache_key,
+                        normalized_text=normalized_query.get("normalized_text", ""),
+                        domain=domain,
+                        ttl_days=7
+                    )
+                    print(f"✅ [벡터 DB 저장] 질문-캐시 키 매핑 저장 완료 (structured_report, 질문: '{last_user_message[:50]}...')")
         else:
-            print(f"✅ [캐시 저장 건너뛰기] 재검색 불필요 (need_research = false) - 이전 대화 정보만 사용했으므로 저장하지 않음")
+            if not need_research:
+                print(f"✅ [캐시 저장 건너뛰기] 재검색 불필요 (need_research = false) - 이전 대화 정보만 사용했으므로 저장하지 않음")
+            elif is_json_format or response_format == "table":
+                print(f"✅ [캐시 저장 건너뛰기] JSON 형식(표 형식)은 캐시에 저장하지 않음 - 사용자가 명시적으로 요청한 형식이므로 매번 새로 생성")
         
         # 최종 검증: greeting과 report_body가 모두 있는지 확인
         if not greeting or len(greeting) < 10:
