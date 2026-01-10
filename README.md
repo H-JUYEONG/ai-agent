@@ -1,6 +1,5 @@
 # Coding AI Decision Agent
 
-**설명**
 개인 또는 팀의 예산·보안·IDE·업무 특성을 입력하면, 최신 정보 기반으로 코딩 AI 도구를 비교·평가·추천하는 LangGraph + Deep Research 기반 챗봇형 AI 에이전트입니다.
 
 ---
