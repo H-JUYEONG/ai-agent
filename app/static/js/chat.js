@@ -75,7 +75,7 @@ function appendMessageWithOptions() {
     // 메시지 말풍선
     const messageDiv = document.createElement("div");
     messageDiv.className = "message assistant";
-    messageDiv.innerHTML = "안녕하세요! 👋<br><br><strong>코딩 AI 도입을 도와드리는 의사결정 어시스턴트</strong>입니다.<br><br>💬 <strong>\"우리 팀에 어떤 코딩 AI가 맞을까?\"</strong>처럼<br>편하게 질문해 주세요!<br><br>✨ 필요하면 제가 <strong>예산, 팀 규모, 보안 요구사항</strong> 등을<br>추가로 질문해서 <strong>맞춤 추천</strong>을 만들어 드립니다.";
+    messageDiv.innerHTML = "안녕하세요! 👋<br><br><strong>코딩 AI 도구 추천을 전문으로 하는 어시스턴트</strong>입니다.<br><br>팀에 맞는 코딩 AI 도구를 찾아드리기 위해<br>예산, 팀 규모, 사용 언어, 보안 요구사항 등을 분석하여<br>맞춤 추천을 제공해드립니다.<br><br>💬 <strong>질문 예시:</strong><br>- \"우리 팀에 어떤 코딩 AI가 맞을까요?\"<br>- \"코드 리뷰에 AI를 도입하고 싶어요\"<br>- \"Python 개발용 AI 도구 추천해주세요\"<br><br>편하게 질문해 주세요! ✨";
     messages.appendChild(messageDiv);
     messages.scrollTop = messages.scrollHeight;
     

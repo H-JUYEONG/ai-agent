@@ -130,13 +130,25 @@ async def chat(req: ChatRequest):
             "코딩 AI 도구 추천을 전문으로" in last_reply
         )
         
-        if not is_off_topic_rejection:
+        # 인사 메시지는 캐시하지 않음 (LLM이 is_greeting = true로 판단한 경우)
+        # 인사 응답의 특징: 자기소개 문구 포함 + 짧은 길이 + 인사 키워드
+        # 하드코딩 대신 응답의 패턴을 통합적으로 판단
+        is_greeting = (
+            len(last_reply) < 250 and  # 인사 메시지는 보통 짧음
+            ("어시스턴트입니다" in last_reply or "어시스턴트" in last_reply) and  # 자기소개 포함
+            not any(keyword in last_reply for keyword in ["추천", "비교", "가격", "기능", "설정", "방법"])  # 질문 의도 없음
+        )
+        
+        if not is_off_topic_rejection and not is_greeting:
             cache_data = {"reply": last_reply}
             research_cache.set(req.message, cache_data, domain)
             cache_type = "Redis" if research_cache.available else "메모리"
             print(f"💾 {cache_type} 캐시 저장: {req.message[:50]}...")
         else:
-            print(f"⚠️ 주제 벗어난 질문 - 캐시 저장 생략")
+            if is_greeting:
+                print(f"👋 인사 메시지 - 캐시 저장 생략")
+            else:
+                print(f"⚠️ 주제 벗어난 질문 - 캐시 저장 생략")
         
         # 종료 시간 계산
         elapsed_time = time.time() - start_time
