@@ -30,7 +30,7 @@ async def index(request: Request):
 
 @router.post("/api/chat")
 async def chat(req: ChatRequest):
-    """팀 상황 기반 코딩 AI 도입 의사결정 에이전트 API"""
+    """개인 또는 팀 상황 기반 코딩 AI 도입 의사결정 에이전트 API"""
     
     try:
         # 도메인은 항상 코딩으로 고정
