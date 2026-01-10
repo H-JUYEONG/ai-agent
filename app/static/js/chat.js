@@ -258,11 +258,71 @@ function appendMessage(role, text) {
     const div = document.createElement("div");
     div.className = `message ${role}`;
     
-    // HTML 및 마크다운 렌더링
-    div.innerHTML = formatMarkdown(text);
+    // JSON 형식 테이블 데이터 체크
+    try {
+        const parsed = JSON.parse(text);
+        if (parsed.type === "table" && parsed.columns && parsed.rows) {
+            // Structured Output 테이블 데이터인 경우 HTML 테이블로 렌더링
+            div.innerHTML = renderTable(parsed.columns, parsed.rows);
+        } else {
+            // 일반 JSON은 마크다운으로 렌더링
+            div.innerHTML = formatMarkdown(text);
+        }
+    } catch (e) {
+        // JSON이 아니면 마크다운으로 렌더링
+        div.innerHTML = formatMarkdown(text);
+    }
     
     messages.appendChild(div);
     messages.scrollTop = messages.scrollHeight;
+}
+
+// 표 데이터를 HTML 테이블로 렌더링
+function renderTable(columns, rows) {
+    if (!columns || !rows || columns.length === 0) {
+        return '<p>표 데이터가 없습니다.</p>';
+    }
+    
+    let html = '<div class="table-container" style="overflow-x: auto; margin: 10px 0;">';
+    html += '<table style="width: 100%; border-collapse: collapse; border: 1px solid #ddd; font-size: 14px;">';
+    
+    // 헤더 행
+    html += '<thead><tr style="background-color: #f5f5f5;">';
+    columns.forEach(col => {
+        html += `<th style="padding: 12px; border: 1px solid #ddd; text-align: left; font-weight: bold; white-space: nowrap;">${escapeHtml(col)}</th>`;
+    });
+    html += '</tr></thead>';
+    
+    // 데이터 행
+    html += '<tbody>';
+    rows.forEach(row => {
+        html += '<tr>';
+        // 열 개수에 맞게 셀 생성
+        for (let i = 0; i < columns.length; i++) {
+            const cellContent = i < row.length ? (row[i] || '') : '';
+            const escapedContent = escapeHtml(cellContent);
+            // 마크다운 형식 지원 (링크, 굵은 글씨 등)
+            const formattedContent = formatMarkdown(escapedContent);
+            html += `<td style="padding: 10px; border: 1px solid #ddd; vertical-align: top;">${formattedContent}</td>`;
+        }
+        html += '</tr>';
+    });
+    html += '</tbody>';
+    
+    html += '</table></div>';
+    return html;
+}
+
+// HTML 이스케이프 (XSS 방지)
+function escapeHtml(text) {
+    const map = {
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#039;'
+    };
+    return String(text).replace(/[&<>"']/g, m => map[m]);
 }
 
 // 간단한 마크다운 → HTML 변환

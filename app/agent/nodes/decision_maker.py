@@ -393,8 +393,49 @@ async def run_decision_engine(state: AgentState, config: RunnableConfig):
         
         print(f"✅ [Decision Engine] 실행 완료: 추천 {len(decision_result.recommended_tools)}개, 제외 {len(decision_result.excluded_tools)}개")
         
+        # 🚨 Follow-up 질문인 경우 이전 추천 순서 유지
+        previous_tools_ordered = state.get("previous_tools_ordered")
+        decision_result_dict = decision_result.model_dump()
+        
+        if previous_tools_ordered and len(previous_tools_ordered) > 0:
+            print(f"🔍 [Decision Engine] 이전 추천 순서 확인: {previous_tools_ordered}")
+            
+            # 이전 순서를 기준으로 추천 도구 재정렬
+            recommended_tools = decision_result.recommended_tools
+            reordered_tools = []
+            used_tools = set()
+            
+            # 1. 이전 순서대로 우선 배치 (현재 추천에 있는 도구만)
+            for prev_tool in previous_tools_ordered:
+                # 도구명 매칭 (대소문자 무시, 약간의 변형 허용)
+                matched_tool = None
+                for tool in recommended_tools:
+                    prev_clean = re.sub(r'[\(\)\[\]월\s\$0-9]+', '', prev_tool.lower()).strip()
+                    tool_clean = re.sub(r'[\(\)\[\]월\s\$0-9]+', '', tool.lower()).strip()
+                    if prev_clean in tool_clean or tool_clean in prev_clean or tool_clean == prev_clean:
+                        if tool not in used_tools:
+                            matched_tool = tool
+                            break
+                
+                if matched_tool:
+                    reordered_tools.append(matched_tool)
+                    used_tools.add(matched_tool)
+            
+            # 2. 이전 순서에 없는 도구들 추가 (하지만 Follow-up이면 이전 도구만 사용하는 것이 원칙)
+            for tool in recommended_tools:
+                if tool not in used_tools:
+                    # Follow-up 질문이면 이전 도구만 사용하는 것이 원칙이지만,
+                    # Decision Engine 결과가 있으면 최대한 활용
+                    reordered_tools.append(tool)
+                    used_tools.add(tool)
+            
+            # 재정렬된 도구 목록으로 DecisionResult 업데이트
+            if reordered_tools:
+                decision_result_dict["recommended_tools"] = reordered_tools
+                print(f"✅ [Decision Engine] 이전 순서 적용: {reordered_tools}")
+        
         return {
-            "decision_result": decision_result.model_dump(),
+            "decision_result": decision_result_dict,
             "tool_facts": tool_facts  # tool_facts를 state에 저장하여 route_after_research에서 사용 가능하도록
         }
     except Exception as e:

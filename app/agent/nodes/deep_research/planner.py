@@ -62,43 +62,111 @@ async def write_research_brief(
     question_number = len(human_messages)
     is_followup = question_number > 1
     
-    # 이전 도구 추출 (Follow-up인 경우) - 모든 AI 메시지에서 추출
+    # 이전 도구 추출 (Follow-up인 경우) - 모든 AI 메시지에서 추출 (순서 유지)
     previous_tools = ""
+    previous_tools_ordered = []  # 순서 유지용 리스트
     if is_followup:
         all_tools = []
+        tools_with_order = []  # 순서 정보 포함
+        
         for msg in reversed(messages_list[:-1]):  # 마지막 사용자 메시지 제외
             if isinstance(msg, AIMessage) and hasattr(msg, 'content'):
                 content = str(msg.content)
-                # 다양한 패턴으로 도구명 추출
-                # 패턴 1: 📊 [도구명]
+                # 다양한 패턴으로 도구명 추출 (순서 정보 포함)
+                # 패턴 1: 📊 [도구명] (순서대로 나타나는 순서 사용)
                 tools_found = re.findall(r'📊\s+([^\n]+)', content)
-                if tools_found:
-                    all_tools.extend([t.strip() for t in tools_found])
+                for idx, tool in enumerate(tools_found):
+                    if tool.strip():
+                        tools_with_order.append((tool.strip(), idx, "emoji"))
                 # 패턴 2: ## 📊 [도구명]
                 tools_found2 = re.findall(r'##\s+📊\s+([^\n]+)', content)
-                if tools_found2:
-                    all_tools.extend([t.strip() for t in tools_found2])
-                # 패턴 3: **1순위: [도구명]**, **2순위: [도구명]**
-                tools_found3 = re.findall(r'\*\*[0-9]+순위:\s*([^\*]+)\*\*', content)
-                if tools_found3:
-                    all_tools.extend([t.strip() for t in tools_found3])
+                for idx, tool in enumerate(tools_found2):
+                    if tool.strip():
+                        tools_with_order.append((tool.strip(), idx, "header"))
+                # 패턴 3: **1순위: [도구명]**, **2순위: [도구명]** (순서 정보 명시)
+                tools_found3 = re.findall(r'\*\*([0-9]+)순위:\s*([^\*]+)\*\*', content)
+                for order_str, tool in tools_found3:
+                    if tool.strip():
+                        order = int(order_str) if order_str.isdigit() else 999
+                        tools_with_order.append((tool.strip(), order, "rank"))
                 # 패턴 4: **최종 추천: [도구명]**
                 tools_found4 = re.findall(r'\*\*최종 추천:\s*([^\*]+)\*\*', content)
-                if tools_found4:
-                    all_tools.extend([t.strip() for t in tools_found4])
+                for idx, tool in enumerate(tools_found4):
+                    if tool.strip():
+                        tools_with_order.append((tool.strip(), 0, "final"))
+                # 패턴 5: "가장 추천하는 도구: [도구명]" 또는 "추천하는 도구: [도구명]"
+                tools_found5 = re.findall(r'(?:가장\s+)?추천하는\s+도구:\s*([^\n\.]+)', content)
+                for idx, tool in enumerate(tools_found5):
+                    if tool.strip():
+                        # 불필요한 문자 제거 (괄호, 기타 특수문자)
+                        tool_clean = re.sub(r'[\(\)\[\]월\s\$0-9/]+$', '', tool.strip()).strip()
+                        if tool_clean and len(tool_clean) > 2:
+                            tools_with_order.append((tool_clean, 0, "recommended"))
+                # 패턴 5-1: "대안 1: [도구명]", "대안 2: [도구명]" 등
+                tools_found5_1 = re.findall(r'대안\s*([0-9]+):\s*([^\n\.]+)', content)
+                for order_str, tool in tools_found5_1:
+                    if tool.strip():
+                        order = int(order_str) if order_str.isdigit() else 999
+                        # 불필요한 문자 제거 (괄호, 기타 특수문자) - 하지만 도구명 자체는 보존
+                        tool_clean = re.sub(r'[\(\)\[\]월\s\$0-9/]+$', '', tool.strip()).strip()
+                        # 공백 정리 (여러 공백을 하나로)
+                        tool_clean = re.sub(r'\s+', ' ', tool_clean).strip()
+                        if tool_clean and len(tool_clean) > 2:
+                            tools_with_order.append((tool_clean, order, "alternative"))
+                # 패턴 6: "💡 추천 도구" 또는 "💡 맞춤 추천" 섹션의 도구명
+                # 💡 섹션에서 도구명 추출 (더 정확한 패턴)
+                if "💡" in content and "추천" in content:
+                    # 섹션 내에서 도구명 찾기 (더 구체적인 패턴)
+                    recommendation_section = re.search(r'💡[^\n]*(?:추천[^\n]*)', content, re.MULTILINE)
+                    if recommendation_section:
+                        section_content = recommendation_section.group(0)
+                        # "가장 추천하는 도구: [도구명]" 패턴 다시 확인
+                        tools_found6 = re.findall(r'가장\s+추천하는\s+도구:\s*([^\n\.]+)', section_content)
+                        for tool in tools_found6:
+                            tool_clean = re.sub(r'[\(\)\[\]월\s\$0-9/]+$', '', tool.strip()).strip()
+                            if tool_clean and len(tool_clean) > 2:
+                                tools_with_order.append((tool_clean, 0, "recommendation_section"))
+                        # GitHub Copilot, Cursor 같은 도구명 패턴 찾기 (섹션 내에서만)
+                        tool_names_in_recommendation = re.findall(r'\b(GitHub\s+Copilot|Cursor|Codeium|Tabnine|Aider|Replit|Cline|Windsurf|CodeRabbit|DeepCode|JetBrains\s+AI\s+Assistant|CodeAnt|Qodo|Codacy)\b', section_content, re.IGNORECASE)
+                        for tool_name in tool_names_in_recommendation:
+                            if tool_name.strip():
+                                tools_with_order.append((tool_name.strip(), 999, "recommendation_section"))
         
-        # 중복 제거하고 순서 유지
+        # 도구명 정제 및 순서 유지
         seen = set()
         unique_tools = []
-        for tool in all_tools:
-            # 도구명 정제 (불필요한 문자 제거)
-            tool_clean = re.sub(r'[\(\)\[\]월\s\$0-9]+', '', tool).strip()
-            if tool_clean and tool_clean not in seen and len(tool_clean) > 2:
-                seen.add(tool_clean)
-                unique_tools.append(tool_clean)
         
-        previous_tools = ", ".join(unique_tools[:10])  # 최대 10개
-        print(f"🔍 [DEBUG] write_research_brief - 이전 추천 도구 추출: {previous_tools}")
+        # rank 패턴이 있으면 그것을 우선 사용 (순서 정보 명시)
+        ranked_tools = [(t, o) for t, o, p in tools_with_order if p == "rank"]
+        if ranked_tools:
+            ranked_tools.sort(key=lambda x: x[1])  # 순서대로 정렬
+            for tool, order in ranked_tools:
+                tool_clean = re.sub(r'[\(\)\[\]월\s\$0-9]+', '', tool).strip()
+                if tool_clean and tool_clean not in seen and len(tool_clean) > 2:
+                    seen.add(tool_clean)
+                    unique_tools.append(tool_clean)
+        
+        # alternative 패턴도 순서 정보가 있으므로 우선 처리
+        alternative_tools = [(t, o) for t, o, p in tools_with_order if p == "alternative"]
+        if alternative_tools:
+            alternative_tools.sort(key=lambda x: x[1])  # 순서대로 정렬
+            for tool, order in alternative_tools:
+                tool_clean = re.sub(r'[\(\)\[\]월\s\$0-9]+', '', tool).strip()
+                if tool_clean and tool_clean not in seen and len(tool_clean) > 2:
+                    seen.add(tool_clean)
+                    unique_tools.append(tool_clean)
+        
+        # 나머지 도구들 추가 (나타난 순서대로)
+        for tool, order, pattern in tools_with_order:
+            if pattern not in ["rank", "alternative"]:  # 이미 추가된 rank와 alternative는 제외
+                tool_clean = re.sub(r'[\(\)\[\]월\s\$0-9]+', '', tool).strip()
+                if tool_clean and tool_clean not in seen and len(tool_clean) > 2:
+                    seen.add(tool_clean)
+                    unique_tools.append(tool_clean)
+        
+        previous_tools_ordered = unique_tools[:10]  # 최대 10개
+        previous_tools = ", ".join(previous_tools_ordered)
+        print(f"🔍 [DEBUG] write_research_brief - 이전 추천 도구 추출: {previous_tools} (순서 유지)")
     
     prompt_content = transform_messages_into_research_topic_prompt.format(
         messages=get_buffer_string(messages_list),
@@ -147,19 +215,27 @@ async def write_research_brief(
         max_researcher_iterations=configurable.max_researcher_iterations
     )
     
+    # 이전 추천 도구 순서를 state에 저장 (Follow-up 질문 처리용)
+    update_dict = {
+        "research_brief": response.research_brief,
+        "question_type": response.question_type,  # LLM이 판단한 질문 유형 저장
+        "constraints": constraints,  # 제약 조건 저장
+        "supervisor_messages": {
+            "type": "override",
+            "value": [
+                SystemMessage(content=supervisor_system_prompt),
+                HumanMessage(content=response.research_brief)
+            ]
+        }
+    }
+    
+    # Follow-up인 경우 이전 추천 도구 순서 저장
+    if is_followup and previous_tools_ordered:
+        update_dict["previous_tools_ordered"] = previous_tools_ordered
+        print(f"🔍 [DEBUG] 이전 추천 도구 순서 저장: {previous_tools_ordered}")
+    
     return Command(
         goto="research_supervisor",
-        update={
-            "research_brief": response.research_brief,
-            "question_type": response.question_type,  # LLM이 판단한 질문 유형 저장
-            "constraints": constraints,  # 제약 조건 저장
-            "supervisor_messages": {
-                "type": "override",
-                "value": [
-                    SystemMessage(content=supervisor_system_prompt),
-                    HumanMessage(content=response.research_brief)
-                ]
-            }
-        }
+        update=update_dict
     )
 

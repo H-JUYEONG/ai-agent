@@ -21,6 +21,7 @@ from app.agent.nodes._common import (
     research_cache,
     vector_store,
 )
+from app.agent.nodes.writer import generate_greeting_dynamically
 
 
 async def clarify_with_user(
@@ -95,6 +96,21 @@ async def clarify_with_user(
     
     # 주제 검증 통과 → 이제 쿼리 정규화 및 캐시 조회 진행
     print(f"✅ [주제 검증] 주제 검증 통과 - 정상 프로세스 진행")
+    
+    # ========== 🆕 답변 형식 요청 감지 ==========
+    # 사용자가 요청한 답변 형식 감지 (표, 테이블, 리스트 등)
+    response_format = None
+    last_user_message_lower = last_user_message.lower()
+    
+    if any(keyword in last_user_message_lower for keyword in ["표로 정리", "표로", "테이블로", "비교표", "표 형식", "표 형식으로"]):
+        response_format = "table"
+        print(f"🔍 [답변 형식] 테이블 형식 요청 감지")
+    elif any(keyword in last_user_message_lower for keyword in ["리스트로", "목록으로", "리스트 형식", "목록 형식"]):
+        response_format = "list"
+        print(f"🔍 [답변 형식] 리스트 형식 요청 감지")
+    else:
+        response_format = "markdown"  # 기본값
+        print(f"🔍 [답변 형식] 마크다운 형식 (기본값)")
     
     # ========== 🆕 1단계: 쿼리 정규화 (캐시 키 생성) ==========
     model_config = {
@@ -212,122 +228,17 @@ async def clarify_with_user(
                 print(f"⚠️ [캐시 무시] 리포트 본문이 너무 짧음 ({len(report_body)}자). 캐시 무시하고 새로 생성")
                 # pass - 캐시를 사용하지 않고 아래 연구 프로세스로 진행
             else:
-                # 🚨 인사 멘트는 항상 새로 생성 (캐시에서 가져오지 않음)
-                # final_report_generation과 동일한 방식으로 인사 멘트 생성 (동일한 모델, 동일한 프롬프트 스타일)
-                print(f"✅ [캐시 처리] 리포트 본문은 캐시에서 가져옴 ({len(report_body)}자), 인사 멘트는 final_report_generation과 동일한 방식으로 생성")
+                # 🚨 인사 멘트는 항상 LLM으로 동적 생성 (공통 함수 사용)
+                print(f"✅ [캐시 처리] 리포트 본문은 캐시에서 가져옴 ({len(report_body)}자), 인사 멘트는 LLM으로 동적 생성")
                 
-                # final_report_generation과 동일한 모델 및 설정 사용
-                # 모델별 max_tokens 제한 확인 및 적용
-                model_name_greeting = configurable.final_report_model.lower()
-                if "gpt-4o-mini" in model_name_greeting:
-                    greeting_max_tokens = min(configurable.final_report_model_max_tokens, 16384)  # gpt-4o-mini 최대 16384
-                elif "gpt-4o" in model_name_greeting and "mini" not in model_name_greeting:
-                    greeting_max_tokens = min(configurable.final_report_model_max_tokens, 16384)  # gpt-4o 최대 16384
-                elif "gpt-4" in model_name_greeting:
-                    greeting_max_tokens = min(configurable.final_report_model_max_tokens, 4096)  # gpt-4 최대 4096
-                else:
-                    greeting_max_tokens = min(configurable.final_report_model_max_tokens, 16384)  # 기본값
-                
-                greeting_model_config = {
-                    "model": configurable.final_report_model,
-                    "max_tokens": greeting_max_tokens,
-                    "api_key": get_api_key_for_model(configurable.final_report_model, config),
-                }
-                
-                # final_report_generation 프롬프트의 인사 멘트 생성 부분과 동일한 스타일
-                # 사용자 메시지 전체 컨텍스트 제공 (final_report_generation과 동일)
-                messages_context = get_buffer_string(messages) if messages else last_user_message
-                
-                greeting_prompt = f"""당신은 코딩 AI 도구 추천 전문가입니다. 사용자 질문에 맞는 자연스럽고 상세한 인사 멘트를 생성하세요.
-
-사용자 메시지:
-{messages_context}
-
-**원칙:**
-- 사용자의 현재 질문 내용과 의도를 정확히 파악하여 그에 맞는 자연스러운 멘트를 생성
-- 질문의 핵심 키워드(팀 규모, 목적, 요구사항, 도메인 등)를 반영
-- 질문에 언급된 구체적인 내용(팀 규모, 목적, 요구사항 등)을 반드시 포함
-- 자연스럽고 친절한 톤 유지
-- 적절한 길이 (40-100자 정도, 너무 짧지 않게)
-
-**좋은 예시:**
-- 질문: "저희는 백엔드·프론트엔드 포함해서 8명 규모의 개발팀인데, 코드 작성과 리뷰에 AI를 도입해서 생산성을 높이고 싶습니다. 어떤 도구가 좋을까요?"
-  인사 멘트: "네! 백엔드와 프론트엔드를 포함한 8명 규모의 개발팀에 적합한 AI 도구들을 분석해드리겠습니다. 팀의 코드 작성 및 리뷰 효율성 향상에 도움이 되는 도구를 비교해드리겠습니다."
-
-- 질문: "코드 작성과 리뷰를 위한 AI 도구 추천해줘"
-  인사 멘트: "네! 코드 작성과 리뷰를 위한 최적의 AI 도구를 추천해드리겠습니다."
-
-**나쁜 예시 (너무 짧거나 맥락 없음):**
-- "안녕하세요." (너무 짧음)
-- "AI 도구로 생산성을 높여드리겠습니다." (너무 짧고 구체적이지 않음)
-- "네! 조사해드리겠습니다." (너무 일반적)
-
-인사 멘트만 출력하세요 ([GREETING] 태그 없이, 다른 설명 없이):"""
-                
-                try:
-                    greeting_model = configurable_model.with_config(greeting_model_config)
-                    greeting_response = await greeting_model.ainvoke([HumanMessage(content=greeting_prompt)])
-                    greeting = str(greeting_response.content).strip()
-                    
-                    # 불필요한 따옴표나 태그 제거
-                    greeting = greeting.strip('"\'`').strip()
-                    
-                    # "안녕하세요"로만 시작하는 너무 짧은 응답 감지
-                    if greeting.startswith("안녕하세요") and len(greeting) < 15:
-                        print(f"⚠️ [캐시 처리] LLM 응답이 너무 짧음: '{greeting}', 재시도")
-                        greeting = ""  # 재시도하도록 빈 문자열로 설정
-                    
-                    # 응답이 너무 길면 적절히 자르기 (100자 이내로)
-                    if greeting and len(greeting) > 100:
-                        # 문장 단위로 자르기 (마침표나 느낌표 기준)
-                        sentences = re.split(r'[.!?。]', greeting)
-                        if len(sentences) > 1 and sentences[0]:
-                            # 첫 번째 문장만 사용하고 마침표 추가
-                            greeting = sentences[0].strip() + '.'
-                        else:
-                            # 문장 구분이 없으면 100자로 자르기
-                            greeting = greeting[:100].strip()
-                    
-                    # 빈 응답이거나 너무 짧으면 재시도 (최소 30자 이상)
-                    if not greeting or len(greeting) < 30:
-                        print(f"⚠️ [캐시 처리] LLM 응답이 너무 짧음 ({len(greeting) if greeting else 0}자), 재시도")
-                        # 더 상세한 프롬프트로 재시도 (final_report_generation 스타일)
-                        retry_prompt = f"""당신은 코딩 AI 도구 추천 전문가입니다.
-
-사용자 메시지:
-{messages_context}
-
-위 질문에 맞는 자연스럽고 상세한 인사 멘트를 생성하세요. 질문의 핵심 내용(팀 규모, 목적, 요구사항 등)을 구체적으로 반영한 40-100자 정도의 상세한 인사 멘트를 작성해주세요.
-
-예시: "네! 백엔드와 프론트엔드를 포함한 8명 규모의 개발팀에 적합한 AI 도구들을 분석해드리겠습니다. 팀의 코드 작성 및 리뷰 효율성 향상에 도움이 되는 도구를 비교해드리겠습니다."
-
-인사 멘트만 출력하세요:"""
-                        retry_response = await greeting_model.ainvoke([HumanMessage(content=retry_prompt)])
-                        greeting = str(retry_response.content).strip().strip('"\'`').strip()
-                        
-                        # 재시도 후에도 너무 짧으면 질문 기반으로 동적 생성
-                        if not greeting or len(greeting) < 30:
-                            # 질문의 핵심 키워드를 추출해서 동적으로 생성
-                            keywords = []
-                            if "팀" in last_user_message or "규모" in last_user_message:
-                                keywords.append("팀")
-                            if "코드" in last_user_message or "리뷰" in last_user_message:
-                                keywords.append("코드 작성 및 리뷰")
-                            if "도구" in last_user_message or "추천" in last_user_message:
-                                keywords.append("도구 추천")
-                            
-                            if keywords:
-                                greeting = f"네! {'와 '.join(keywords[:2])}에 적합한 AI 도구를 분석해드리겠습니다."
-                            else:
-                                greeting = f"네! {last_user_message[:30]}에 대해 조사해드리겠습니다."
-                    
-                    print(f"✅ [캐시 처리] LLM으로 인사 멘트 생성 완료: '{greeting}' (길이: {len(greeting)}자)")
-                except Exception as e:
-                    print(f"⚠️ [캐시 처리] LLM 인사 멘트 생성 실패: {e}, 질문 기반 동적 생성")
-                    # LLM 실패 시 질문 내용을 기반으로 동적으로 생성 (하드코딩 최소화)
-                    question_preview = last_user_message[:50] if len(last_user_message) > 50 else last_user_message
-                    greeting = f"네! {question_preview}에 대해 조사해드리겠습니다."
-                    print(f"✅ [캐시 처리] 동적 생성 인사 멘트: '{greeting}'")
+                greeting = await generate_greeting_dynamically(messages, config, is_followup)
+                if not greeting or len(greeting) < 20:
+                    # LLM 생성 실패 시 질문 기반 최소 생성
+                    if last_user_message:
+                        greeting = f"{last_user_message[:50]}에 대해 분석해드리겠습니다."
+                    else:
+                        greeting = "분석해드리겠습니다."
+                    print(f"⚠️ [캐시 처리] LLM 멘트 생성 실패 또는 너무 짧음, fallback 사용: '{greeting}'")
                 print(f"✅ [캐시 처리] 리포트 본문 길이: {len(report_body)}자, 시작 100자: {report_body[:100]}")
                 
                 return Command(
@@ -373,83 +284,57 @@ async def clarify_with_user(
                 report_body = cached_content.strip()
             
             if len(report_body) >= 200:
-                # 인사 멘트 생성 (기존 로직과 동일)
-                print(f"✅ [유사 질문 처리] 리포트 본문은 캐시에서 가져옴 ({len(report_body)}자), 인사 멘트는 새로 생성")
+                # 인사 멘트 생성 (LLM으로 동적 생성)
+                print(f"✅ [유사 질문 처리] 리포트 본문은 캐시에서 가져옴 ({len(report_body)}자), 인사 멘트는 LLM으로 동적 생성")
                 
-                # final_report_generation과 동일한 방식으로 인사 멘트 생성
-                # 모델별 max_tokens 제한 확인 및 적용
-                model_name_greeting2 = configurable.final_report_model.lower()
-                if "gpt-4o-mini" in model_name_greeting2:
-                    greeting_max_tokens2 = min(configurable.final_report_model_max_tokens, 16384)  # gpt-4o-mini 최대 16384
-                elif "gpt-4o" in model_name_greeting2 and "mini" not in model_name_greeting2:
-                    greeting_max_tokens2 = min(configurable.final_report_model_max_tokens, 16384)  # gpt-4o 최대 16384
-                elif "gpt-4" in model_name_greeting2:
-                    greeting_max_tokens2 = min(configurable.final_report_model_max_tokens, 4096)  # gpt-4 최대 4096
-                else:
-                    greeting_max_tokens2 = min(configurable.final_report_model_max_tokens, 16384)  # 기본값
+                greeting = await generate_greeting_dynamically(messages, config, is_followup)
+                if not greeting or len(greeting) < 20:
+                    # LLM 생성 실패 시 질문 기반 최소 생성
+                    if last_user_message:
+                        greeting = f"{last_user_message[:50]}에 대해 분석해드리겠습니다."
+                    else:
+                        greeting = "분석해드리겠습니다."
+                    print(f"⚠️ [유사 질문 처리] LLM 멘트 생성 실패 또는 너무 짧음, fallback 사용: '{greeting}'")
                 
-                greeting_model_config = {
-                    "model": configurable.final_report_model,
-                    "max_tokens": greeting_max_tokens2,
-                    "api_key": get_api_key_for_model(configurable.final_report_model, config),
-                }
-                
-                messages_context = get_buffer_string(messages) if messages else last_user_message
-                
-                greeting_prompt = f"""당신은 코딩 AI 도구 추천 전문가입니다. 사용자 질문에 맞는 자연스럽고 상세한 인사 멘트를 생성하세요.
-
-사용자 메시지:
-{messages_context}
-
-**원칙:**
-- 사용자의 현재 질문 내용과 의도를 정확히 파악하여 그에 맞는 자연스러운 멘트를 생성
-- 질문의 핵심 키워드(팀 규모, 목적, 요구사항, 도메인 등)를 반영
-- 질문에 언급된 구체적인 내용(팀 규모, 목적, 요구사항 등)을 반드시 포함
-- 자연스럽고 친절한 톤 유지
-- 적절한 길이 (40-100자 정도, 너무 짧지 않게)
-
-인사 멘트만 출력하세요 ([GREETING] 태그 없이, 다른 설명 없이):"""
-                
-                try:
-                    greeting_model = configurable_model.with_config(greeting_model_config)
-                    greeting_response = await greeting_model.ainvoke([HumanMessage(content=greeting_prompt)])
-                    greeting = str(greeting_response.content).strip().strip('"\'`').strip()
-                    
-                    if not greeting or len(greeting) < 30:
-                        greeting = f"네! {last_user_message[:30]}에 대해 조사해드리겠습니다."
-                    
-                    print(f"✅ [유사 질문 처리] 인사 멘트 생성 완료: '{greeting}'")
-                    
-                    return Command(
-                        goto=END,
-                        update={"messages": [
-                            AIMessage(content=greeting),
-                            AIMessage(content=report_body)
-                        ]}
-                    )
-                except Exception as e:
-                    print(f"⚠️ [유사 질문 처리] 인사 멘트 생성 실패: {e}")
-                    greeting = f"네! {last_user_message[:30]}에 대해 조사해드리겠습니다."
-                    return Command(
-                        goto=END,
-                        update={"messages": [
-                            AIMessage(content=greeting),
-                            AIMessage(content=report_body)
-                        ]}
-                    )
+                return Command(
+                    goto=END,
+                    update={"messages": [
+                        AIMessage(content=greeting),
+                        AIMessage(content=report_body)
+                    ]}
+                )
     
     # 캐시 미스 및 유사 질문도 없음 → 새로 생성
     # 주제 검증은 이미 위(라인 138-147)에서 완료되었으므로 response를 재사용
     print(f"⚠️ [캐시 MISS + 유사 질문 없음] 새로 생성 진행 (주제 검증 완료)")
     
+    # 🆕 검색 필요 여부 체크 (Follow-up 질문인 경우)
+    need_research = getattr(response, 'need_research', True)  # 기본값: True (검색 필요)
+    if not need_research:
+        print(f"✅ [검색 불필요] 이전 대화 정보만으로 답변 가능 - 검색 건너뛰고 바로 리포트 생성")
+        # 검색 없이 바로 final_report_generation으로 이동
+        return Command(
+            goto="final_report_generation",
+            update={
+                "messages": [AIMessage(content=response.verification if response.verification else "네! 이전 추천 내용을 정리해드리겠습니다.")],
+                "normalized_query": normalized,  # 🆕 정규화 정보 저장
+                "response_format": response_format,  # 🆕 답변 형식 저장
+                "need_research": False  # 🆕 재검색 불필요 플래그 저장 (캐시/벡터 DB 저장 건너뛰기용)
+            }
+        )
+        print(f"✅ [검색 불필요] state에 response_format='{response_format}' 저장 완료")
+    
     # 명확화 비활성화 시 바로 다음 단계로 (주제 검증은 이미 완료됨)
     if not configurable.allow_clarification:
         print(f"✅ [DEBUG] 주제 검증 통과 - 바로 연구 시작")
+        print(f"✅ [명확화 비활성화] state에 response_format='{response_format}' 저장 완료")
         return Command(
             goto="write_research_brief",
             update={
                 "messages": [AIMessage(content=response.verification)],
-                "normalized_query": normalized  # 🆕 정규화 정보 저장
+                "normalized_query": normalized,  # 🆕 정규화 정보 저장
+                "response_format": response_format,  # 🆕 답변 형식 저장
+                "need_research": True  # 🆕 검색 필요 플래그 저장
             }
         )
     
@@ -460,11 +345,14 @@ async def clarify_with_user(
             update={"messages": [AIMessage(content=response.question)]}
         )
     else:
+        print(f"✅ [검색 필요] state에 response_format='{response_format}' 저장 완료")
         return Command(
             goto="write_research_brief",
             update={
                 "messages": [AIMessage(content=response.verification)],
-                "normalized_query": normalized  # 🆕 정규화 정보 저장
+                "normalized_query": normalized,  # 🆕 정규화 정보 저장
+                "response_format": response_format,  # 🆕 답변 형식 저장
+                "need_research": True  # 🆕 검색 필요 플래그 저장
             }
         )
 

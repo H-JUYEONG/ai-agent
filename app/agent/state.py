@@ -41,6 +41,10 @@ class ClarifyWithUser(BaseModel):
         description="사용자에게 추가 질문이 필요한가?",
         default=False,
     )
+    need_research: bool = Field(
+        description="새로운 검색/연구가 필요한가? (Follow-up 질문 중 이전 대화 정보만으로 답변 가능하면 false)",
+        default=True,
+    )
     question: str = Field(
         description="사용자에게 물어볼 명확화 질문 (need_clarification이 true인 경우만)",
         default="",
@@ -52,6 +56,16 @@ class ClarifyWithUser(BaseModel):
     off_topic_message: str = Field(
         description="주제에서 벗어난 경우 사용자에게 보낼 거부 메시지",
         default="죄송합니다. 저는 코딩 AI 도구 추천을 전문으로 하는 어시스턴트입니다. 다시 말씀해주세요!",
+    )
+
+
+class TableData(BaseModel):
+    """표 형식 데이터 (Structured Output)"""
+    columns: List[str] = Field(
+        description="표의 열 헤더 (예: ['도구명', '가격', '통합 기능', '장점', '단점'])"
+    )
+    rows: List[List[str]] = Field(
+        description="표의 데이터 행들 (각 행은 columns 순서와 동일한 개수의 셀을 포함)"
     )
 
 
@@ -146,8 +160,11 @@ class AgentState(MessagesState):
     normalized_query: Optional[dict] = None  # 정규화된 쿼리 정보
     constraints: Optional[dict] = None  # 하드 제약 조건 (필터링 규칙)
     question_type: Optional[str] = None  # LLM이 판단한 질문 유형
+    need_research: Optional[bool] = True  # 재검색 필요 여부 (기본값: True, 검색 필요)
     tool_facts: Annotated[List[dict], override_reducer] = []  # 구조화된 도구 사실 (Fact Model)
     decision_result: Optional[dict] = None  # 판단 결과 (DecisionResult)
+    previous_tools_ordered: Optional[List[str]] = None  # 이전 추천 도구 순서 (Follow-up 질문 처리용)
+    response_format: Optional[str] = None  # 답변 형식 요청 (table, list, markdown 등)
 
 
 class SupervisorState(TypedDict):

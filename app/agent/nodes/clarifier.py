@@ -6,6 +6,7 @@ from app.agent.nodes._common import (
     AIMessage,
     HumanMessage,
 )
+from app.agent.nodes.writer import generate_greeting_dynamically
 
 
 async def clarify_missing_constraints(state: AgentState, config: RunnableConfig):
@@ -115,7 +116,16 @@ async def clarify_missing_constraints(state: AgentState, config: RunnableConfig)
         # 제약 조건은 있지만 Decision Engine 결과가 없는 경우 (tool_facts 부족 등)
         question_text = "도구 정보가 부족하여 정확한 비교가 어렵습니다. 더 구체적인 정보를 제공해주시면 정확한 추천을 드릴 수 있습니다."
     
-    greeting = "네! 조건에 맞춰 분석해드리겠습니다." if is_followup else "네! 조사해드리겠습니다."
+    # LLM으로 동적 멘트 생성
+    greeting = await generate_greeting_dynamically(messages_list, config, is_followup)
+    if not greeting or len(greeting) < 20:
+        # LLM 생성 실패 시 질문 기반 최소 생성
+        last_user_message = messages_list[-1].content if messages_list and isinstance(messages_list[-1], HumanMessage) else ""
+        if last_user_message:
+            greeting = f"{str(last_user_message)[:50]}에 대한 정보가 필요합니다."
+        else:
+            greeting = "추가 정보가 필요합니다."
+        print(f"⚠️ [Clarifier] LLM 멘트 생성 실패 또는 너무 짧음, fallback 사용: '{greeting}'")
     
     return {
         "final_report": f"{greeting}\n\n{question_text}" if question_text else greeting,
@@ -135,7 +145,17 @@ async def cannot_answer(state: AgentState, config: RunnableConfig):
     question_number = len(human_messages)
     is_followup = question_number > 1
     
-    greeting = "네! 조건에 맞춰 분석해드리겠습니다." if is_followup else "네! 조사해드리겠습니다."
+    # LLM으로 동적 멘트 생성
+    greeting = await generate_greeting_dynamically(messages_list, config, is_followup)
+    if not greeting or len(greeting) < 20:
+        # LLM 생성 실패 시 질문 기반 최소 생성
+        last_user_message = messages_list[-1].content if messages_list and isinstance(messages_list[-1], HumanMessage) else ""
+        if last_user_message:
+            greeting = f"죄송합니다. {str(last_user_message)[:50]}에 대한 답변을 제공할 수 없습니다."
+        else:
+            greeting = "죄송합니다. 답변을 제공할 수 없습니다."
+        print(f"⚠️ [Cannot Answer] LLM 멘트 생성 실패 또는 너무 짧음, fallback 사용: '{greeting}'")
+    
     error_message = "Decision Engine 분석 결과가 없어 답변할 수 없습니다. 도구 정보가 부족하거나 질문이 명확하지 않을 수 있습니다."
     
     return {

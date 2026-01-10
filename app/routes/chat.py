@@ -80,6 +80,7 @@ async def chat(req: ChatRequest):
         
         # 최종 리포트 추출
         messages = result.get("messages", [])
+        print(f"🔍 [DEBUG] chat.py - result에서 받은 messages 개수: {len(messages)}개")
         
         # AI 메시지만 추출 (중복 제거)
         ai_messages = []
@@ -91,6 +92,11 @@ async def chat(req: ChatRequest):
                 if content not in seen_contents:
                     ai_messages.append(msg)
                     seen_contents.add(content)
+                    print(f"🔍 [DEBUG] chat.py - AI 메시지 추가: {len(content)}자 - {content[:50]}...")
+                else:
+                    print(f"⚠️ [DEBUG] chat.py - 중복 메시지 스킵: {len(content)}자 - {content[:50]}...")
+        
+        print(f"🔍 [DEBUG] chat.py - 최종 AI 메시지 개수: {len(ai_messages)}개")
         
         # 마지막 메시지 확인 (인사말 + 리포트 분리)
         reply_messages = []
@@ -121,8 +127,12 @@ async def chat(req: ChatRequest):
             final_report = result.get("final_report", "")
             reply_messages = [final_report] if final_report else ["응답을 생성하지 못했습니다."]
         
-        # 3. 캐시 저장 (주제에 맞는 질문만 저장)
+        # 3. 캐시 저장 (주제에 맞는 질문만 저장, 재검색 불필요한 경우도 제외)
         last_reply = reply_messages[-1] if reply_messages else ""
+        
+        # 🆕 재검색이 필요 없는 경우(need_research = false)에는 캐시 저장 건너뛰기
+        # 이전 대화 정보만 사용한 경우이므로 새로운 캐시가 필요 없음
+        need_research = result.get("need_research", True)  # 기본값: True (검색 필요)
         
         # 주제에서 벗어난 거부 메시지는 캐시하지 않음
         is_off_topic_rejection = (
@@ -139,13 +149,15 @@ async def chat(req: ChatRequest):
             not any(keyword in last_reply for keyword in ["추천", "비교", "가격", "기능", "설정", "방법"])  # 질문 의도 없음
         )
         
-        if not is_off_topic_rejection and not is_greeting:
+        if not is_off_topic_rejection and not is_greeting and need_research:
             cache_data = {"reply": last_reply}
             research_cache.set(req.message, cache_data, domain)
             cache_type = "Redis" if research_cache.available else "메모리"
             print(f"💾 {cache_type} 캐시 저장: {req.message[:50]}...")
         else:
-            if is_greeting:
+            if not need_research:
+                print(f"✅ 재검색 불필요 (need_research = false) - 캐시 저장 생략")
+            elif is_greeting:
                 print(f"👋 인사 메시지 - 캐시 저장 생략")
             else:
                 print(f"⚠️ 주제 벗어난 질문 - 캐시 저장 생략")
@@ -161,14 +173,20 @@ async def chat(req: ChatRequest):
             return {"reply": reply_messages[0]}
     
     except Exception as e:
-        error_msg = f"❌ 오류 발생: {str(e)}"
-        print(error_msg)
+        import traceback
+        error_trace = traceback.format_exc()
+        error_type = type(e).__name__
+        error_msg = str(e)
+        
+        print(f"❌ 오류 발생: {error_type}: {error_msg}")
+        print(f"❌ 예외 상세 정보:\n{error_trace}")
+        
         return {
             "reply": f"""
 죄송합니다. 처리 중 오류가 발생했습니다.
 
 **오류 내용:**
-{str(e)}
+{error_type}: {error_msg}
 
 **해결 방법:**
 1. .env 파일에 API 키가 올바르게 설정되었는지 확인

@@ -25,6 +25,7 @@ from app.agent.state import (
     ResearchQuestion,
     ResearcherState,
     SupervisorState,
+    TableData,
 )
 from app.agent.models import ToolFact, UserContext, PricingPlan, SecurityPolicy, WorkflowType
 from app.agent.decision import DecisionEngine
