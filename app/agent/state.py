@@ -26,15 +26,23 @@ class ResearchComplete(BaseModel):
 
 class ClarifyWithUser(BaseModel):
     """사용자 질문 정제"""
+    is_greeting: bool = Field(
+        description="사용자 메시지가 순수 인사인가? (안녕하세요, 하이 등 인사만 하고 질문 의도가 없는 경우)",
+        default=False,
+    )
+    greeting_message: str = Field(
+        description="인사 메시지인 경우 사용자에게 보낼 친절한 응답 (is_greeting이 true인 경우만)",
+        default="",
+    )
     is_on_topic: bool = Field(
-        description="사용자 질문이 코딩 AI 도구 추천과 관련 있는가?",
+        description="사용자 질문이 코딩 AI 도구 추천과 관련 있는가? (인사가 아닌 경우)",
     )
     need_clarification: bool = Field(
         description="사용자에게 추가 질문이 필요한가?",
         default=False,
     )
     question: str = Field(
-        description="사용자에게 물어볼 명확화 질문 (명확화가 필요한 경우)",
+        description="사용자에게 물어볼 명확화 질문 (need_clarification이 true인 경우만)",
         default="",
     )
     verification: str = Field(

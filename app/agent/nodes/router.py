@@ -42,7 +42,7 @@ async def clarify_with_user(
     
     last_user_message = messages[-1].content if messages else ""
     
-    # ========== 🚨 LLM 기반 주제 검증 (검색/캐시 전에 먼저 수행) ==========
+    # ========== 🚨 LLM 기반 주제 검증 및 인사 감지 (검색/캐시 전에 먼저 수행) ==========
     # 주제 검증을 LLM이 판단하도록 하여 불필요한 쿼리 정규화/캐시 조회 방지
     # 키워드 선검증 제거: LLM이 모든 질문의 주제 관련성을 판단
     model_config_clarify = {
@@ -66,6 +66,23 @@ async def clarify_with_user(
     )
     
     response = await clarification_model.ainvoke([HumanMessage(content=prompt_content)])
+    
+    # 🆕 인사 메시지 체크 (가장 먼저!)
+    if response.is_greeting:
+        print(f"👋 [인사 응답] LLM이 인사 메시지 감지 - 친절하게 응답")
+        # LLM이 greeting_message를 생성하도록 프롬프트에서 명시했으므로, 없으면 경고하고 fallback 사용
+        greeting_msg = response.greeting_message
+        if not greeting_msg or greeting_msg.strip() == "":
+            print(f"⚠️ [인사 응답] LLM이 greeting_message를 생성하지 않음 - fallback 사용")
+            greeting_msg = (
+                "안녕하세요! 반갑습니다 😊\n\n"
+                "저는 코딩 AI 도구 추천을 전문으로 하는 어시스턴트입니다. "
+                "팀에 적합한 코딩 AI 도구(코드 작성, 리뷰, 자동 완성 등)에 대해 궁금한 점이 있으면 언제든지 물어보세요!"
+            )
+        return Command(
+            goto=END,
+            update={"messages": [AIMessage(content=greeting_msg)]}
+        )
     
     # 🚨 주제 관련성 체크 (검색/캐시 전 차단)
     if not response.is_on_topic:
