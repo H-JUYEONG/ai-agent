@@ -472,14 +472,21 @@ async def clarify_with_user(
 def route_after_research(state: AgentState) -> Literal["structured_report_generation", "final_report_generation", "clarify_missing_constraints", "cannot_answer"]:
     """연구 완료 후 라우팅: Decision Engine 결과 유무와 제약 조건 충분 여부에 따라 분기"""
     
+    import re
+    
     # Decision Engine이 실행되어야 하는 질문인지 확인
     question_type = state.get("question_type", "comparison")
     messages_list = state.get("messages", [])
-    last_user_message = str(messages_list[-1].content).lower() if messages_list else ""
+    
+    # 🚨 HumanMessage만 추출 (AI 응답 메시지 제외)
+    human_messages = [msg for msg in messages_list if isinstance(msg, HumanMessage)]
+    all_user_messages_text = " ".join([str(msg.content).lower() for msg in human_messages])
+    last_user_message = str(human_messages[-1].content).lower() if human_messages else ""
     
     # 🚨 디버깅: 질문 내용과 타입 확인
     print(f"🔍 [Routing DEBUG] question_type: {question_type}")
-    print(f"🔍 [Routing DEBUG] last_user_message: {last_user_message[:100]}")
+    print(f"🔍 [Routing DEBUG] HumanMessage 개수: {len(human_messages)}")
+    print(f"🔍 [Routing DEBUG] last_user_message: {last_user_message[:100] if last_user_message else 'None'}")
     
     is_decision_question = (
         question_type in ["decision", "comparison"] or
@@ -491,7 +498,7 @@ def route_after_research(state: AgentState) -> Literal["structured_report_genera
         "어떤 도구가 좋을까요" in last_user_message or
         ("어떤 도구" in last_user_message and "좋" in last_user_message) or
         ("vs" in last_user_message or "대비" in last_user_message) or
-        ("최적화" in last_user_message and "도구" in last_user_message)  # 🆕 "최적화된 도구" 패턴
+        ("최적화" in last_user_message and "도구" in last_user_message)
     )
     
     # 🚨 디버깅: Decision 질문 판정 결과
@@ -506,13 +513,75 @@ def route_after_research(state: AgentState) -> Literal["structured_report_genera
     team_size = constraints.get("team_size") if constraints else None
     budget_max = constraints.get("budget_max") if constraints else None
     
-    # 메시지에서 팀 규모 추출 시도
-    if not team_size and messages_list:
-        last_user_msg = str(messages_list[-1].content)
-        team_size_match = re.search(r'(\d+)\s*명', last_user_msg)
-        if team_size_match:
-            team_size = int(team_size_match.group(1))
+    # 🚨 전체 사용자 메시지 히스토리에서 정보 추출
+    has_user_type = False
+    if not team_size and all_user_messages_text:
+        # "개인", "개인 개발자", "개인 사용자" 등을 인식하여 team_size = 1로 설정
+        if any(keyword in all_user_messages_text for keyword in ["개인", "개인 개발자", "개인 사용자", "개인용", "개인으로"]):
+            team_size = 1
+            has_user_type = True
+        elif any(keyword in all_user_messages_text for keyword in ["팀", "팀용", "우리 팀", "팀 규모"]):
+            has_user_type = True
+            # "X명" 패턴 찾기
+            team_size_match = re.search(r'(\d+)\s*명', all_user_messages_text)
+            if team_size_match:
+                team_size = int(team_size_match.group(1))
+        else:
+            # "X명" 패턴 찾기
+            team_size_match = re.search(r'(\d+)\s*명', all_user_messages_text)
+            if team_size_match:
+                team_size = int(team_size_match.group(1))
     
+    # 개발 언어/분야 확인 (전체 메시지 히스토리에서)
+    has_development_area = False
+    if all_user_messages_text:
+        # 프로그래밍 언어 확인 (하드코딩 - 언어는 정해져 있으므로 OK)
+        languages = ["python", "javascript", "java", "typescript", "c++", "c#", "go", "rust", "php", "ruby", "swift", "kotlin", "dart", "r", "scala", "clojure", "perl", "lua", "matlab"]
+        # 개발 분야 확인
+        domains = ["웹 개발", "백엔드", "프론트엔드", "풀스택", "모바일", "게임", "데이터", "ai", "ml", "머신러닝", "앱 개발"]
+        # 프레임워크/라이브러리 확인 (주요 프레임워크만)
+        frameworks = ["react", "vue", "angular", "django", "flask", "spring", "node.js", "express", "fastapi", "laravel", "rails"]
+        
+        # "~으로 개발", "~로 개발", "~ 개발", "~을 사용" 같은 표현도 포함
+        if any(lang in all_user_messages_text for lang in languages) or \
+           any(domain in all_user_messages_text for domain in domains) or \
+           any(fw in all_user_messages_text for fw in frameworks) or \
+           re.search(r'으로\s*개발|로\s*개발|개발', all_user_messages_text):
+            has_development_area = True
+    
+    # 🚨 매우 중요: 기본적으로 정보가 충분하다고 가정!
+    # 정말 모호한 경우만 명확화 요구
+    # 다음 중 하나라도 있으면 충분한 정보:
+    # 1. 개발 언어/분야가 있음
+    # 2. 사용 형태(개인/팀)가 있음
+    # 3. 제약 조건(예산/팀 규모)이 있음
+    # 4. 일반적인 추천 요청 (코딩 AI 도구 추천 등)
+    
+    # 정말 모호한 경우 체크 (명확화 필요)
+    is_too_vague = False
+    if all_user_messages_text:
+        # 너무 모호한 표현들
+        vague_patterns = [
+            r'나\s*개발\s*할건데',  # "나 개발 할건데"
+            r'개발\s*할건데',  # "개발 할건데"
+            r'개발\s*하려고\s*하는데',  # "개발 하려고 하는데"
+            r'개발\s*하려는데',  # "개발 하려는데"
+        ]
+        # 모호한 패턴이 있고, 다른 구체적인 정보가 없으면 모호함
+        has_vague_pattern = any(re.search(pattern, all_user_messages_text) for pattern in vague_patterns)
+        if has_vague_pattern and not has_development_area and not has_user_type and not team_size and not budget_max:
+            is_too_vague = True
+    
+    # 정보 충분 여부 판단: 모호하지 않고, 어느 정도 정보가 있으면 충분
+    has_sufficient_info = not is_too_vague and (
+        has_development_area or  # 개발 언어/분야가 있으면 충분
+        has_user_type or  # 사용 형태가 있으면 충분
+        team_size is not None or  # 팀 규모가 있으면 충분
+        budget_max is not None or  # 예산이 있으면 충분
+        "코딩" in all_user_messages_text or  # "코딩" 키워드가 있으면 충분
+        "ai" in all_user_messages_text or  # "AI" 키워드가 있으면 충분
+        "도구" in all_user_messages_text  # "도구" 키워드가 있으면 충분 (일반 추천 가능)
+    )
     has_sufficient_constraints = team_size is not None or budget_max is not None
     
     # 🚨 디버깅: Decision Engine 결과 확인
@@ -525,7 +594,7 @@ def route_after_research(state: AgentState) -> Literal["structured_report_genera
         else:
             print(f"🔍 [Routing DEBUG] decision_result.recommended_tools: {getattr(decision_result, 'recommended_tools', [])}")
     print(f"🔍 [Routing DEBUG] tool_facts 개수: {len(tool_facts) if tool_facts else 0}")
-    print(f"🔍 [Routing DEBUG] 제약 조건 충분 여부: {has_sufficient_constraints} (team_size: {team_size}, budget_max: {budget_max})")
+    print(f"🔍 [Routing DEBUG] 정보 충분 여부: {has_sufficient_info} (user_type: {has_user_type}, dev_area: {has_development_area}, team_size: {team_size}, budget_max: {budget_max})")
     
     if is_decision_question:
         # 🚨 Decision 질문인 경우
@@ -550,16 +619,14 @@ def route_after_research(state: AgentState) -> Literal["structured_report_genera
                 print(f"⚠️ [Routing DEBUG] Decision Engine 결과는 있지만 추천 도구가 없음 (recommended_tools 빈 리스트)")
                 print(f"⚠️ [Routing] 필터링이 너무 엄격했거나 tool_facts 정보 부족 → final_report_generation (fallback)")
                 return "final_report_generation"
-        elif not has_sufficient_constraints:
-            # 제약 조건이 부족하면 사용자에게 질문
-            print(f"🔍 [Routing] Decision 질문이지만 제약 조건 부족 → clarify_missing_constraints")
+        elif not has_sufficient_info:
+            # 🚨 개발 언어/분야도 없고 제약 조건도 없으면 명확화 필요
+            print(f"🔍 [Routing] Decision 질문이지만 정보 부족 (user_type: {has_user_type}, dev_area: {has_development_area}, team_size: {team_size}, budget: {budget_max}) → clarify_missing_constraints")
             return "clarify_missing_constraints"
         else:
-            # 제약 조건은 충분하지만 Decision Engine 결과가 없음 (tool_facts 부족 등)
-            # 🆕 Fallback: 일반 리포트 생성으로 대체 (사용자에게 최소한의 답변 제공)
-            print(f"⚠️ [Routing] Decision 질문 + 제약 조건 충분 + Decision Engine 결과 없음 → final_report_generation (fallback)")
-            print(f"⚠️ [Routing DEBUG] decision_result: {decision_result}, tool_facts: {len(tool_facts) if tool_facts else 0}개")
-            print(f"⚠️ [Routing] tool_facts가 없어 Decision Engine을 실행할 수 없지만, 일반 리포트로 답변 제공")
+            # 🚨 제약 조건은 없지만 개발 언어/분야가 있으면 충분한 정보!
+            # Decision Engine 결과가 없어도 일반 리포트로 추천 제공
+            print(f"✅ [Routing] Decision 질문 + 개발 언어/분야 정보 있음 (제약 조건 없지만 충분) → final_report_generation")
             return "final_report_generation"
     else:
         # Discovery 질문인 경우: 일반 리포트 생성 (Decision Engine 불필요)

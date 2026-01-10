@@ -46,15 +46,23 @@ async def run_decision_engine(state: AgentState, config: RunnableConfig):
     team_size = constraints.get("team_size") if constraints else None
     budget_max = constraints.get("budget_max") if constraints else None
     
-    # 메시지에서 팀 규모와 예산 추출 시도 (빠른 확인)
-    if not team_size and messages_list:
-        last_user_msg = str(messages_list[-1].content)
-        team_size_match = re.search(r'(\d+)\s*명', last_user_msg)
-        if team_size_match:
-            team_size = int(team_size_match.group(1))
+    # 🚨 전체 사용자 메시지 히스토리에서 정보 추출 (HumanMessage만)
+    human_messages = [msg for msg in messages_list if isinstance(msg, HumanMessage)]
+    all_user_messages_text = " ".join([str(msg.content).lower() for msg in human_messages])
     
-    if not budget_max and messages_list:
-        last_user_msg = str(messages_list[-1].content).lower()
+    # 팀 규모 추출 시도 (전체 히스토리에서)
+    if not team_size and all_user_messages_text:
+        # "개인", "개인 개발자", "개인 사용자" 등을 인식하여 team_size = 1로 설정
+        if any(keyword in all_user_messages_text for keyword in ["개인", "개인 개발자", "개인 사용자", "개인용", "개인으로"]):
+            team_size = 1
+        else:
+            # "X명" 패턴 찾기
+            team_size_match = re.search(r'(\d+)\s*명', all_user_messages_text)
+            if team_size_match:
+                team_size = int(team_size_match.group(1))
+    
+    # 예산 추출 시도 (전체 히스토리에서)
+    if not budget_max and all_user_messages_text:
         budget_patterns = [
             r'월\s*\$?\s*(\d+)',
             r'\$?\s*(\d+)\s*까지',
@@ -63,15 +71,64 @@ async def run_decision_engine(state: AgentState, config: RunnableConfig):
             r'\$?\s*(\d+)\s*이내',
         ]
         for pattern in budget_patterns:
-            budget_match = re.search(pattern, last_user_msg)
+            budget_match = re.search(pattern, all_user_messages_text)
             if budget_match:
                 budget_max = float(budget_match.group(1))
                 break
     
-    # 제약 조건이 부족하면 빠르게 반환 (tool_facts 추출 안 함)
-    has_sufficient_constraints = team_size is not None or budget_max is not None
-    if not has_sufficient_constraints:
-        print(f"⚡ [Decision Engine] 제약 조건 부족 - 빠른 반환 (team_size: {team_size}, budget_max: {budget_max})")
+    # 개발 언어/분야 확인 (제약 조건이 없어도 개발 언어/분야가 있으면 충분!)
+    has_development_area = False
+    if all_user_messages_text:
+        # 프로그래밍 언어 확인 (하드코딩 - 언어는 정해져 있으므로 OK)
+        languages = ["python", "javascript", "java", "typescript", "c++", "c#", "go", "rust", "php", "ruby", "swift", "kotlin", "dart", "r", "scala", "clojure", "perl", "lua", "matlab"]
+        # 개발 분야 확인
+        domains = ["웹 개발", "백엔드", "프론트엔드", "풀스택", "모바일", "게임", "데이터", "ai", "ml", "머신러닝", "앱 개발"]
+        # 프레임워크/라이브러리 확인
+        frameworks = ["react", "vue", "angular", "django", "flask", "spring", "node.js", "express", "fastapi", "laravel", "rails"]
+        
+        if any(lang in all_user_messages_text for lang in languages) or \
+           any(domain in all_user_messages_text for domain in domains) or \
+           any(fw in all_user_messages_text for fw in frameworks) or \
+           re.search(r'으로\s*개발|로\s*개발|개발', all_user_messages_text):
+            has_development_area = True
+    
+    # 🚨 기본적으로 정보가 충분하다고 가정!
+    # 정말 모호한 경우만 명확화 요구
+    # 다음 중 하나라도 있으면 충분한 정보:
+    # 1. 개발 언어/분야가 있음
+    # 2. 사용 형태(개인/팀)가 있음
+    # 3. 제약 조건(예산/팀 규모)이 있음
+    # 4. 일반적인 추천 요청 (코딩 AI 도구 추천 등)
+    
+    # 정말 모호한 경우 체크 (명확화 필요)
+    is_too_vague = False
+    if all_user_messages_text:
+        # 너무 모호한 표현들
+        vague_patterns = [
+            r'나\s*개발\s*할건데',  # "나 개발 할건데"
+            r'개발\s*할건데',  # "개발 할건데"
+            r'개발\s*하려고\s*하는데',  # "개발 하려고 하는데"
+            r'개발\s*하려는데',  # "개발 하려는데"
+        ]
+        # 모호한 패턴이 있고, 다른 구체적인 정보가 없으면 모호함
+        has_vague_pattern = any(re.search(pattern, all_user_messages_text) for pattern in vague_patterns)
+        has_user_type_keyword = any(keyword in all_user_messages_text for keyword in ["개인", "개인 개발자", "개인 사용자", "개인용", "개인으로", "팀", "팀용", "우리 팀"])
+        if has_vague_pattern and not has_development_area and not has_user_type_keyword and not team_size and not budget_max:
+            is_too_vague = True
+    
+    # 정보 충분 여부 판단: 모호하지 않고, 어느 정도 정보가 있으면 충분
+    has_sufficient_info = not is_too_vague and (
+        has_development_area or  # 개발 언어/분야가 있으면 충분
+        team_size is not None or  # 팀 규모가 있으면 충분
+        budget_max is not None or  # 예산이 있으면 충분
+        any(keyword in all_user_messages_text for keyword in ["개인", "개인 개발자", "개인 사용자", "개인용", "개인으로", "팀", "팀용", "우리 팀"]) or  # 사용 형태가 있으면 충분
+        "코딩" in all_user_messages_text or  # "코딩" 키워드가 있으면 충분
+        "ai" in all_user_messages_text or  # "AI" 키워드가 있으면 충분
+        "도구" in all_user_messages_text  # "도구" 키워드가 있으면 충분 (일반 추천 가능)
+    )
+    
+    if not has_sufficient_info:
+        print(f"⚡ [Decision Engine] 정보 부족 (너무 모호) - 빠른 반환 (team_size: {team_size}, budget_max: {budget_max}, dev_area: {has_development_area}, is_too_vague: {is_too_vague})")
         return {}  # route_after_research에서 clarify_missing_constraints로 라우팅
     
     # 제약 조건이 충분하면 tool_facts 추출 및 Decision Engine 실행

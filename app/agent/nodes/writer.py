@@ -659,7 +659,7 @@ async def structured_report_generation(state: AgentState, config: RunnableConfig
     
     report_prompt = final_report_generation_prompt.format(
         research_brief=research_brief,
-        messages=get_buffer_string(messages_list[-5:]),
+        messages=get_buffer_string(messages_list),  # 전체 대화 이력 사용 (final_report_generation과 일관성 유지)
         findings=findings[:3000] if findings else "연구 결과 없음",
         date=date,
         is_followup="YES" if is_followup else "NO",
