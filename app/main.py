@@ -25,9 +25,15 @@ class NoCacheStaticFiles(StarletteStaticFiles):
     
     def file_response(self, *args, **kwargs):
         response = super().file_response(*args, **kwargs)
-        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        # 캐시 완전 비활성화
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate, max-age=0"
         response.headers["Pragma"] = "no-cache"
         response.headers["Expires"] = "0"
+        # ETag와 Last-Modified 제거 (브라우저가 304 Not Modified를 반환하지 않도록)
+        if "ETag" in response.headers:
+            del response.headers["ETag"]
+        if "Last-Modified" in response.headers:
+            del response.headers["Last-Modified"]
         return response
 
 app.mount("/static", NoCacheStaticFiles(directory="app/static"), name="static")
