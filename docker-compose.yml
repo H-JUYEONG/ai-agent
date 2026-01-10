@@ -57,11 +57,14 @@ services:
 
     restart: unless-stopped
 
-    volumes:
-      - ./app:/app/app
+    # ⚠️ 프로덕션 배포 시 volumes 마운트 제거 필요!
+    # volumes 마운트가 있으면 로컬 파일이 빌드된 이미지의 파일을 덮어씁니다.
+    # 개발 환경에서만 사용하세요 (핫 리로드용)
+    # volumes:
+    #   - ./app:/app/app
 
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/"]
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 15s
       timeout: 5s
       retries: 5
