@@ -37,7 +37,7 @@
 ① Query Normalizer (LLM 기반 쿼리 정규화)
     ↓
 ② Redis 최종 답변 캐시 조회
-    ├─ HIT → 즉시 응답 (0.1초)
+    ├─ HIT → 즉시 응답 (1초)
     └─ MISS
         ↓
 ③ Vector DB (Qdrant) Facts 검색
@@ -54,9 +54,8 @@
 ```
 
 **성능 개선:**
-- 첫 질문: ~10초 (웹 검색 필요)
-- 유사 질문: ~0.1초 (Redis 캐시)
-- 관련 질문: ~2초 (Vector DB에서 Facts 재사용)
+- 유사 질문: ~1초 (Redis 캐시)
+- 관련 질문: ~5초 (Vector DB에서 Facts 재사용)
 
 ---
 
@@ -163,67 +162,10 @@ final_report_generation (질문 유형별 리포트 생성, Redis 캐시 저장 
 **핵심 노드 설명**:
 - **`clarify_with_user`**: Query Normalizer로 의미적으로 동일한 질문 통합 → Redis 캐시 조회 → HIT 시 동적 인사말 생성 후 즉시 응답
 - **`researcher`**: Vector DB 우선 검색으로 웹 검색 최소화, 충분한 정보가 있으면 웹 검색 생략하여 비용 절감
-- **`final_report_generation`**: 질문 유형에 따라 리포트 포맷팅 (추천 순위/비교 표/설명/정보/가이드), 인사말과 리포트 분리하여 2개 메시지 버블로 반환
+- **`final_report_generation`**: 질문 유형에 따라 리포트 포맷팅 (추천 순위/비교/설명/정보/가이드), 인사말과 리포트 분리하여 2개 메시지 버블로 반환
 
 ---
 
-## ⚡ 실행 방법
-
-### 방법 1: Docker Compose (권장)
-
-```bash
-# 1. .env 파일 생성 (env.example.txt 참고)
-cp env.example.txt .env
-# API 키 입력: OPENAI_API_KEY, TAVILY_API_KEY, SERPER_API_KEY
-
-# 2. Docker Compose 실행
-docker-compose up -d
-
-# 3. 브라우저에서 접속
-http://localhost:8000
-```
-
-서비스 포함:
-- **app**: FastAPI 애플리케이션 (포트 8000)
-- **redis**: Redis 캐시 (포트 6379)
-- **qdrant**: Qdrant Vector DB (포트 6333, 6334)
-
-### 방법 2: 로컬 실행
-
-1. **가상환경 생성 & 활성화**
-
-```bash
-conda create -n agent python=3.12
-conda activate agent
-```
-
-2. **패키지 설치**
-
-```bash
-pip install -r requirements.txt
-```
-
-3. **Redis & Qdrant 설치 (선택)**
-
-```bash
-# Redis (Docker)
-docker run -d -p 6379:6379 redis:7-alpine
-
-# Qdrant (Docker)
-docker run -d -p 6333:6333 -p 6334:6334 qdrant/qdrant
-```
-
-4. **서버 실행**
-
-```bash
-uvicorn app.main:app --reload
-```
-
-5. **브라우저에서 접속**: `http://localhost:8000`
-
-**참고**: Redis/Qdrant 없이도 실행 가능 (메모리 캐시로 Fallback)
-
----
 
 ## 🔄 변경 사항 (기존 코드 대비)
 
@@ -252,4 +194,3 @@ uvicorn app.main:app --reload
 
 - **LangChain/LangGraph**: 0.x → 1.0+ (API 변경사항 반영)
 - **Python**: 3.11 (Docker), 3.12 (로컬 개발)
-- **추가 의존성**: `qdrant-client`, `sentence-transformers`
